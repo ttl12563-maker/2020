@@ -195,7 +195,7 @@
 
     function getOriginalNickText(writer, nickEl, nickTextSpan) {
         if (nickTextSpan.dataset.origNick) return nickTextSpan.dataset.origNick;
-        const source = writer.dataset.nick || nickEl.dataset.nick || nickTextSpan.textContent || '';
+        const source = nickTextSpan.textContent || '';
         const original = String(source).trim() || String(source || '');
         nickTextSpan.dataset.origNick = original;
         return original;
@@ -206,7 +206,7 @@
         const mode = lowCfg.nickDisplayMode || 'colorOnly';
         const displayText = lowCfg.displayText || '깡계';
         if (mode === 'replace') return displayText;
-        if (mode === 'paren') return `(${displayText})`;
+        if (mode === 'paren') return `${origNick}(${displayText})`;
         return origNick;
     }
 
