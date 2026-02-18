@@ -200,20 +200,24 @@
         const nickEl = writer.querySelector('.nickname') || writer.querySelector('a') || writer.querySelector('em') || writer;
         if (!nickEl) return;
 
-        if (!nickEl.dataset.originalColor) {
-            nickEl.dataset.originalColor = nickEl.style.color || '';
+        if (!nickEl.dataset.originalWeight) {
             nickEl.dataset.originalWeight = nickEl.style.fontWeight || '';
             nickEl.dataset.originalStyle = nickEl.style.fontStyle || '';
             nickEl.dataset.originalTextDecoration = nickEl.style.textDecoration || '';
         }
 
+        nickEl.classList.remove('dc-style-lowActivity', 'dc-style-scope', 'dc-style-memo');
+        nickEl.style.removeProperty('--dc-style-color');
+
         if (styleObj) {
-            nickEl.style.color = styleObj.color || '';
+            if (category === 'lowActivity') nickEl.classList.add('dc-style-lowActivity');
+            else if (category === 'scope') nickEl.classList.add('dc-style-scope');
+            else if (category === 'memo') nickEl.classList.add('dc-style-memo');
+            if (styleObj.color) nickEl.style.setProperty('--dc-style-color', styleObj.color);
             nickEl.style.fontWeight = styleObj.bold ? 'bold' : '';
             nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
             nickEl.style.textDecoration = styleObj.strike ? 'line-through' : '';
         } else {
-            nickEl.style.color = nickEl.dataset.originalColor || '';
             nickEl.style.fontWeight = nickEl.dataset.originalWeight || '';
             nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
             nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
@@ -347,6 +351,7 @@
         .gall_writer, .ub-writer, .writer_nikcon { cursor: pointer !important; }
         .gall_writer .nickname, .ub-writer .nickname { display: inline-block; }
         .gall_writer[data-memo-status]:hover .nickname, .ub-writer[data-memo-status]:hover .nickname { font-weight:bold; }
+        .dc-style-lowActivity, .dc-style-scope, .dc-style-memo { color: var(--dc-style-color); }
 
         .dc-modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); backdrop-filter:blur(4px); z-index:999999; display:flex; justify-content:center; align-items:center; opacity:0; animation:modalFadeIn 0.2s forwards; }
         .dc-modal-window { width: 60vw !important; height: 80vh !important; min-width: 800px; min-height: 600px; background:#f8f9fa; border-radius:16px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.5); overflow:hidden; position:relative; transform:scale(0.95); animation:modalPop 0.25s cubic-bezier(0.175,0.885,0.32,1.275) forwards; border: 1px solid #dee2e6; }
@@ -369,13 +374,13 @@
 
         tr.dc-radar-detected { background-color: #ffebee !important; box-shadow: none !important; }
         tr.dc-radar-detected:hover { background-color: #ffcdd2 !important; }
-        tr.dc-radar-detected td.gall_tit a { color: #d32f2f !important; font-weight: bold !important; }
+        tr.dc-radar-detected td.gall_tit a { font-weight: bold !important; }
 
         /* ✨ Highlight Logic Update (Support Comments) */
         tr.dc-user-highlight, li.dc-user-highlight { background-color: #E3F2FD !important; box-shadow: none !important; }
         tr.dc-user-highlight:hover, li.dc-user-highlight:hover { background-color: #BBDEFB !important; }
-        tr.dc-user-highlight td.gall_writer, li.dc-user-highlight .gall_writer { font-weight: bold !important; color: #1565C0 !important; }
-        tr.dc-user-highlight td.gall_tit a, li.dc-user-highlight .gall_tit a { font-weight: bold !important; color: #000 !important; }
+        tr.dc-user-highlight td.gall_writer, li.dc-user-highlight .gall_writer { font-weight: bold !important; }
+        tr.dc-user-highlight td.gall_tit a, li.dc-user-highlight .gall_tit a { font-weight: bold !important; }
     `;
 
     const EDITOR_CSS = `
@@ -918,7 +923,7 @@
                 const tags = (data.tags || []).map(t => `<span class="tag-badge">${t}</span>`).join('');
                 const category = getFinalCategory(data, key).category;
                 const sideStyle = resolveStyleByCategory(category);
-                const titleStyle = sideStyle ? `style="color:${sideStyle.color};font-weight:${sideStyle.bold ? 'bold' : 'normal'};text-decoration:${sideStyle.strike ? 'line-through' : 'none'};"` : '';
+                const titleStyle = sideStyle ? `style="font-weight:${sideStyle.bold ? 'bold' : 'normal'};text-decoration:${sideStyle.strike ? 'line-through' : 'none'};"` : '';
 
                 const info = doc.createElement('div'); info.className = 'page-info';
                 info.innerHTML = `<div class="page-main-row"><span class="page-title" ${titleStyle}>${data.nick||key}</span><span class="page-id">(${key})</span></div>${tags ? `<div class="page-tags">${tags}</div>` : ''}`;
