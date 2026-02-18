@@ -31,9 +31,7 @@
                 bold: true,
                 strike: false,
                 nickDisplayMode: 'colorOnly',
-                replaceText: '깡계',
-                appendTagText: '깡계',
-                appendFormat: '{orig}({tag})'
+                displayText: '깡계'
             },
             scope: { color: '#DC3545', bold: true, strike: false },
             memo: { color: '#2E86FF', bold: false, strike: false }
@@ -43,10 +41,17 @@
     function loadStyleSettings() {
         try {
             const saved = JSON.parse(localStorage.getItem(STYLE_SETTINGS_KEY) || '{}');
+            const savedLowActivity = saved.styles?.lowActivity || {};
+            const fallbackDisplayText = savedLowActivity.displayText ?? savedLowActivity.replaceText ?? savedLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText;
             return {
                 activityThreshold: Number.isFinite(parseInt(saved.activityThreshold, 10)) ? parseInt(saved.activityThreshold, 10) : DEFAULT_STYLE_SETTINGS.activityThreshold,
                 styles: {
-                    lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(saved.styles?.lowActivity || {}) },
+                    lowActivity: {
+                        ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
+                        ...savedLowActivity,
+                        nickDisplayMode: savedLowActivity.nickDisplayMode === 'append' ? 'paren' : (savedLowActivity.nickDisplayMode || DEFAULT_STYLE_SETTINGS.styles.lowActivity.nickDisplayMode),
+                        displayText: fallbackDisplayText
+                    },
                     scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(saved.styles?.scope || {}) },
                     memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(saved.styles?.memo || {}) }
                 }
@@ -61,10 +66,16 @@
     const userActivityPending = {};
 
     function saveStyleSettings(nextSettings) {
+        const nextLowActivity = nextSettings.styles?.lowActivity || {};
         StyleSettings = {
             activityThreshold: Math.max(0, parseInt(nextSettings.activityThreshold, 10) || DEFAULT_STYLE_SETTINGS.activityThreshold),
             styles: {
-                lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(nextSettings.styles?.lowActivity || {}) },
+                lowActivity: {
+                    ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
+                    ...nextLowActivity,
+                    nickDisplayMode: nextLowActivity.nickDisplayMode || DEFAULT_STYLE_SETTINGS.styles.lowActivity.nickDisplayMode,
+                    displayText: nextLowActivity.displayText ?? nextLowActivity.replaceText ?? nextLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText
+                },
                 scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(nextSettings.styles?.scope || {}) },
                 memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(nextSettings.styles?.memo || {}) }
             }
@@ -159,10 +170,28 @@
         return { color: cfg.color || '', bold: !!cfg.bold, strike: !!cfg.strike };
     }
 
-    function getOriginalNickText(writer, nickEl) {
-        if (nickEl.dataset.origNick) return nickEl.dataset.origNick;
-        const source = writer.dataset.nick || nickEl.dataset.nick || nickEl.textContent || '';
-        const original = String(source).trim() || String(source || '');
+    function ensureNicknameTextSpan(nickEl) {
+        let textSpan = nickEl.querySelector(':scope > .dc-nick-text');
+        if (textSpan) return textSpan;
+
+        const textNode = Array.from(nickEl.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0);
+        textSpan = document.createElement('span');
+        textSpan.className = 'dc-nick-text';
+
+        if (textNode) {
+            textSpan.textContent = textNode.nodeValue;
+            nickEl.replaceChild(textSpan, textNode);
+        } else {
+            textSpan.textContent = '';
+            nickEl.prepend(textSpan);
+        }
+
+        return textSpan;
+    }
+
+    function getOriginalNickText(nickEl, textSpan) {
+        if (nickEl.dataset.origNick !== undefined) return nickEl.dataset.origNick;
+        const original = (textSpan?.textContent || '').trim();
         nickEl.dataset.origNick = original;
         return original;
     }
@@ -170,12 +199,9 @@
     function getLowActivityDisplayText(origNick) {
         const lowCfg = StyleSettings.styles.lowActivity || {};
         const mode = lowCfg.nickDisplayMode || 'colorOnly';
-        if (mode === 'replace') return lowCfg.replaceText || '';
-        if (mode === 'append') {
-            const tag = lowCfg.appendTagText || '';
-            const format = lowCfg.appendFormat || '{orig}({tag})';
-            return format.replaceAll('{orig}', origNick || '').replaceAll('{tag}', tag);
-        }
+        const displayText = lowCfg.displayText || '깡계';
+        if (mode === 'replace') return displayText;
+        if (mode === 'paren') return `${origNick}(${displayText})`;
         return origNick;
     }
 
@@ -202,12 +228,11 @@
             nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
         }
 
-        const originalNick = getOriginalNickText(writer, nickEl);
-        if (category === 'lowActivity') {
-            nickEl.textContent = getLowActivityDisplayText(originalNick);
-        } else {
-            nickEl.textContent = originalNick;
-        }
+        const textSpan = ensureNicknameTextSpan(nickEl);
+        const originalNick = getOriginalNickText(nickEl, textSpan);
+        textSpan.textContent = category === 'lowActivity'
+            ? getLowActivityDisplayText(originalNick)
+            : originalNick;
 
         if (typeof totalCount === 'number') {
             writer.title = `글+댓글: ${totalCount}개 (기준 ${StyleSettings.activityThreshold}개 이하)`;
@@ -553,10 +578,8 @@
                 <div class="setting-list">
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 기준</span><input id="activityThresholdInput" type="number" class="setting-input" value="${StyleSettings.activityThreshold}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 색상</span><input id="lowColor" type="color" class="setting-input" value="${sLow.color}" style="padding:2px;"><label><input id="lowBold" type="checkbox" ${sLow.bold ? 'checked' : ''}>Bold</label><label><input id="lowStrike" type="checkbox" ${sLow.strike ? 'checked' : ''}>Strike</label></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 닉표시</span><select id="lowNickDisplayMode" class="setting-input"><option value="colorOnly" ${sLow.nickDisplayMode === 'colorOnly' ? 'selected' : ''}>색상만 변경</option><option value="replace" ${sLow.nickDisplayMode === 'replace' ? 'selected' : ''}>닉네임 교체</option><option value="append" ${sLow.nickDisplayMode === 'append' ? 'selected' : ''}>원래닉+태그</option></select></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">교체 텍스트</span><input id="lowReplaceText" type="text" class="setting-input" value="${sLow.replaceText || ''}"></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">추가 태그</span><input id="lowAppendTagText" type="text" class="setting-input" value="${sLow.appendTagText || ''}"></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">추가 포맷</span><input id="lowAppendFormat" type="text" class="setting-input" value="${sLow.appendFormat || '{orig}({tag})'}"></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 닉표시</span><select id="lowNickDisplayMode" class="setting-input"><option value="colorOnly" ${sLow.nickDisplayMode === 'colorOnly' ? 'selected' : ''}>색상만 변경</option><option value="replace" ${sLow.nickDisplayMode === 'replace' ? 'selected' : ''}>닉네임 교체</option><option value="paren" ${sLow.nickDisplayMode === 'paren' ? 'selected' : ''}>원래닉(텍스트)</option></select></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">표시 텍스트</span><input id="lowDisplayText" type="text" class="setting-input" value="${sLow.displayText || '깡계'}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">스코프 색상</span><input id="scopeColor" type="color" class="setting-input" value="${sScope.color}" style="padding:2px;"><label><input id="scopeBold" type="checkbox" ${sScope.bold ? 'checked' : ''}>Bold</label><label><input id="scopeStrike" type="checkbox" ${sScope.strike ? 'checked' : ''}>Strike</label></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">메모유저 색상</span><input id="memoColor" type="color" class="setting-input" value="${sMemo.color}" style="padding:2px;"><label><input id="memoBold" type="checkbox" ${sMemo.bold ? 'checked' : ''}>Bold</label><label><input id="memoStrike" type="checkbox" ${sMemo.strike ? 'checked' : ''}>Strike</label></div>
                 </div>
@@ -576,9 +599,7 @@
                             bold: doc.getElementById('lowBold').checked,
                             strike: doc.getElementById('lowStrike').checked,
                             nickDisplayMode: doc.getElementById('lowNickDisplayMode').value,
-                            replaceText: doc.getElementById('lowReplaceText').value,
-                            appendTagText: doc.getElementById('lowAppendTagText').value,
-                            appendFormat: doc.getElementById('lowAppendFormat').value
+                            displayText: doc.getElementById('lowDisplayText').value
                         },
                         scope: { color: doc.getElementById('scopeColor').value, bold: doc.getElementById('scopeBold').checked, strike: doc.getElementById('scopeStrike').checked },
                         memo: { color: doc.getElementById('memoColor').value, bold: doc.getElementById('memoBold').checked, strike: doc.getElementById('memoStrike').checked }
