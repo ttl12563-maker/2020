@@ -30,7 +30,8 @@
                 color: '#FF0000',
                 bold: true,
                 strike: false,
-                displayText: '깡계'
+                displayText: '깡계',
+                suffixFontScale: 0.85
             },
             scope: { color: '#DC3545', bold: true, strike: false },
             memo: { color: '#2E86FF', bold: false, strike: false }
@@ -48,7 +49,8 @@
                     lowActivity: {
                         ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
                         ...savedLowActivity,
-                        displayText: fallbackDisplayText
+                        displayText: fallbackDisplayText,
+                        suffixFontScale: Math.min(1, Math.max(0.5, Number(savedLowActivity.suffixFontScale ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale) || DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale))
                     },
                     scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(saved.styles?.scope || {}) },
                     memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(saved.styles?.memo || {}) }
@@ -71,7 +73,8 @@
                 lowActivity: {
                     ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
                     ...nextLowActivity,
-                    displayText: nextLowActivity.displayText ?? nextLowActivity.replaceText ?? nextLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText
+                    displayText: nextLowActivity.displayText ?? nextLowActivity.replaceText ?? nextLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText,
+                    suffixFontScale: Math.min(1, Math.max(0.5, Number(nextLowActivity.suffixFontScale ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale) || DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale))
                 },
                 scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(nextSettings.styles?.scope || {}) },
                 memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(nextSettings.styles?.memo || {}) }
@@ -218,7 +221,9 @@
 
         const lowCfg = StyleSettings.styles.lowActivity || {};
         const displayText = lowCfg.displayText || '깡계';
+        const suffixScale = Math.min(1, Math.max(0.5, Number(lowCfg.suffixFontScale ?? 0.85) || 0.85));
         const existingSpan = nickEl.querySelector(':scope > .dc-nick-text');
+        nickEl.querySelectorAll('.dc-lowact-suffix').forEach(el => el.remove());
 
         if (category !== 'lowActivity') {
             if (existingSpan?.dataset.origNick) existingSpan.textContent = existingSpan.dataset.origNick;
@@ -231,7 +236,13 @@
 
             const originalNick = (textSpan.dataset.origNick || '').trim();
             if (originalNick) {
-                textSpan.textContent = `${originalNick}(${displayText || '깡계'})`;
+                textSpan.textContent = originalNick;
+                const suffixSpan = document.createElement('span');
+                suffixSpan.className = 'dc-lowact-suffix';
+                suffixSpan.textContent = `(${displayText || '깡계'})`;
+                suffixSpan.style.fontSize = `${suffixScale}em`;
+                if (textSpan.parentNode) textSpan.parentNode.insertBefore(suffixSpan, textSpan.nextSibling);
+                else nickEl.appendChild(suffixSpan);
             }
         }
 
@@ -580,6 +591,7 @@
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 기준</span><input id="activityThresholdInput" type="number" class="setting-input" value="${StyleSettings.activityThreshold}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 색상</span><input id="lowColor" type="color" class="setting-input" value="${sLow.color}" style="padding:2px;"><label><input id="lowBold" type="checkbox" ${sLow.bold ? 'checked' : ''}>Bold</label><label><input id="lowStrike" type="checkbox" ${sLow.strike ? 'checked' : ''}>Strike</label></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">표시 텍스트</span><input id="lowDisplayText" type="text" class="setting-input" value="${sLow.displayText || '깡계'}"></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">괄호 크기</span><input id="lowSuffixFontScale" type="number" min="0.5" max="1" step="0.01" class="setting-input" value="${Math.min(1, Math.max(0.5, Number(sLow.suffixFontScale ?? 0.85) || 0.85))}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">스코프 색상</span><input id="scopeColor" type="color" class="setting-input" value="${sScope.color}" style="padding:2px;"><label><input id="scopeBold" type="checkbox" ${sScope.bold ? 'checked' : ''}>Bold</label><label><input id="scopeStrike" type="checkbox" ${sScope.strike ? 'checked' : ''}>Strike</label></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">메모유저 색상</span><input id="memoColor" type="color" class="setting-input" value="${sMemo.color}" style="padding:2px;"><label><input id="memoBold" type="checkbox" ${sMemo.bold ? 'checked' : ''}>Bold</label><label><input id="memoStrike" type="checkbox" ${sMemo.strike ? 'checked' : ''}>Strike</label></div>
                 </div>
@@ -598,7 +610,8 @@
                             color: doc.getElementById('lowColor').value,
                             bold: doc.getElementById('lowBold').checked,
                             strike: doc.getElementById('lowStrike').checked,
-                            displayText: doc.getElementById('lowDisplayText').value
+                            displayText: doc.getElementById('lowDisplayText').value,
+                            suffixFontScale: doc.getElementById('lowSuffixFontScale').value
                         },
                         scope: { color: doc.getElementById('scopeColor').value, bold: doc.getElementById('scopeBold').checked, strike: doc.getElementById('scopeStrike').checked },
                         memo: { color: doc.getElementById('memoColor').value, bold: doc.getElementById('memoBold').checked, strike: doc.getElementById('memoStrike').checked }
