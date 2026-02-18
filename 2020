@@ -168,20 +168,23 @@
     }
 
     function ensureNicknameTextSpan(nickEl) {
-        let textSpan = nickEl.querySelector(':scope > .dc-nick-text');
+        let textSpan = nickEl.querySelector(':scope > .dc-nick-text') || nickEl.querySelector('.dc-nick-text');
         if (textSpan) return textSpan;
 
         textSpan = document.createElement('span');
         textSpan.className = 'dc-nick-text';
 
-        const textNode = Array.from(nickEl.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0);
-        if (textNode) {
-            const visible = textNode.nodeValue;
-            const nextSibling = textNode.nextSibling;
-            nickEl.removeChild(textNode);
-            textSpan.textContent = visible.trim();
-            if (nextSibling) nickEl.insertBefore(textSpan, nextSibling);
-            else nickEl.appendChild(textSpan);
+        const walker = document.createTreeWalker(nickEl, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                const text = (node.nodeValue || '').trim();
+                return text ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            }
+        });
+        const textNode = walker.nextNode();
+
+        if (textNode && textNode.parentNode) {
+            textSpan.textContent = (textNode.nodeValue || '').trim();
+            textNode.parentNode.replaceChild(textSpan, textNode);
         } else {
             textSpan.textContent = '';
             nickEl.prepend(textSpan);
@@ -221,13 +224,14 @@
             if (existingSpan?.dataset.origNick) existingSpan.textContent = existingSpan.dataset.origNick;
         } else {
             const textSpan = ensureNicknameTextSpan(nickEl);
-            if (!textSpan.dataset.origNick && textSpan.textContent.trim()) {
-                textSpan.dataset.origNick = textSpan.textContent.trim();
+            if (!textSpan.dataset.origNick) {
+                const base = (textSpan.textContent || '').trim();
+                if (base) textSpan.dataset.origNick = base;
             }
 
-            const originalNick = textSpan.dataset.origNick || '';
+            const originalNick = (textSpan.dataset.origNick || '').trim();
             if (originalNick) {
-                textSpan.textContent = `${originalNick}(${displayText})`;
+                textSpan.textContent = `${originalNick}(${displayText || '깡계'})`;
             }
         }
 
