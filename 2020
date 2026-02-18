@@ -57,6 +57,7 @@
     let StyleSettings = loadStyleSettings();
     const userActivityCache = {};
     const userActivityPending = {};
+    let lowActivityDebugCount = 0;
 
     function saveStyleSettings(nextSettings) {
         StyleSettings = {
@@ -96,8 +97,10 @@
                 const text = await response.text();
                 const parts = text.split(',');
                 if (parts.length >= 2) {
-                    const totalCount = parseInt(parts[0], 10) + parseInt(parts[1], 10);
-                    if (!isNaN(totalCount)) {
+                    const postCount = parseInt(parts[0], 10);
+                    const commentCount = parseInt(parts[1], 10);
+                    const totalCount = postCount + commentCount;
+                    if (Number.isFinite(postCount) && Number.isFinite(commentCount) && Number.isFinite(totalCount) && totalCount >= 0) {
                         userActivityCache[uid] = totalCount;
                         return totalCount;
                     }
@@ -141,13 +144,21 @@
     function getFinalCategory(cachedData, uid) {
         const isScope = !!cachedData?.danger;
         const isMemoUser = hasMeaningfulMemoData(cachedData);
-        const totalCount = uid ? userActivityCache[uid] : null;
-        const isLowActivity = typeof totalCount === 'number' && totalCount <= StyleSettings.activityThreshold;
+        const cachedCount = uid ? userActivityCache[uid] : null;
+        const totalCount = Number.isFinite(cachedCount) && cachedCount >= 0 ? cachedCount : null;
+        const isLowActivity = totalCount !== null && totalCount <= StyleSettings.activityThreshold;
 
-        if (isScope) return { category: 'scope', totalCount };
-        if (isLowActivity) return { category: 'lowActivity', totalCount };
-        if (isMemoUser) return { category: 'memo', totalCount };
-        return { category: null, totalCount };
+        let category = null;
+        if (isScope) category = 'scope';
+        else if (isLowActivity) category = 'lowActivity';
+        else if (isMemoUser) category = 'memo';
+
+        if (lowActivityDebugCount < 20) {
+            console.debug('[DC-User-Notion] activity classify', { uid, totalCount, category: category || 'default' });
+            lowActivityDebugCount += 1;
+        }
+
+        return { category, totalCount };
     }
 
     function resolveStyleByCategory(category) {
@@ -200,6 +211,7 @@
     }
 
     function applyNicknameStyle(writer, styleObj, totalCount, category) {
+        const safeCategory = category || 'default';
         const nickEl = writer.querySelector('.nickname') || writer.querySelector('a') || writer.querySelector('em') || writer;
         if (!nickEl) return;
         const nickTextSpan = ensureNicknameTextSpan(nickEl);
@@ -224,7 +236,10 @@
         }
 
         const originalNick = getOriginalNickText(writer, nickEl, nickTextSpan);
-        if (category === 'lowActivity') {
+        const lowCfg = StyleSettings.styles.lowActivity || {};
+        const mode = lowCfg.nickDisplayMode || 'colorOnly';
+        const shouldMutateLowActivityText = safeCategory === 'lowActivity' && (mode === 'replace' || mode === 'paren');
+        if (shouldMutateLowActivityText) {
             nickTextSpan.textContent = getLowActivityDisplayText(originalNick);
         } else {
             nickTextSpan.textContent = originalNick;
