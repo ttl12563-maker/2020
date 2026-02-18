@@ -200,27 +200,25 @@
         const nickEl = writer.querySelector('.nickname') || writer.querySelector('a') || writer.querySelector('em') || writer;
         if (!nickEl) return;
 
-        if (!nickEl.dataset.originalWeight) {
-            nickEl.dataset.originalWeight = nickEl.style.fontWeight || '';
-            nickEl.dataset.originalStyle = nickEl.style.fontStyle || '';
-            nickEl.dataset.originalTextDecoration = nickEl.style.textDecoration || '';
+        const styleTarget = nickEl.querySelector('.dc-nick-text') || nickEl;
+
+        if (!styleTarget.dataset.originalColor) {
+            styleTarget.dataset.originalColor = styleTarget.style.color || '';
+            styleTarget.dataset.originalWeight = styleTarget.style.fontWeight || '';
+            styleTarget.dataset.originalStyle = styleTarget.style.fontStyle || '';
+            styleTarget.dataset.originalTextDecoration = styleTarget.style.textDecoration || '';
         }
 
-        nickEl.classList.remove('dc-style-lowActivity', 'dc-style-scope', 'dc-style-memo');
-        nickEl.style.removeProperty('--dc-style-color');
-
         if (styleObj) {
-            if (category === 'lowActivity') nickEl.classList.add('dc-style-lowActivity');
-            else if (category === 'scope') nickEl.classList.add('dc-style-scope');
-            else if (category === 'memo') nickEl.classList.add('dc-style-memo');
-            if (styleObj.color) nickEl.style.setProperty('--dc-style-color', styleObj.color);
-            nickEl.style.fontWeight = styleObj.bold ? 'bold' : '';
-            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
-            nickEl.style.textDecoration = styleObj.strike ? 'line-through' : '';
+            styleTarget.style.color = styleObj.color || '';
+            styleTarget.style.fontWeight = styleObj.bold ? 'bold' : '';
+            styleTarget.style.fontStyle = styleTarget.dataset.originalStyle || '';
+            styleTarget.style.textDecoration = styleObj.strike ? 'line-through' : '';
         } else {
-            nickEl.style.fontWeight = nickEl.dataset.originalWeight || '';
-            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
-            nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
+            styleTarget.style.color = styleTarget.dataset.originalColor || '';
+            styleTarget.style.fontWeight = styleTarget.dataset.originalWeight || '';
+            styleTarget.style.fontStyle = styleTarget.dataset.originalStyle || '';
+            styleTarget.style.textDecoration = styleTarget.dataset.originalTextDecoration || '';
         }
 
         const lowCfg = StyleSettings.styles.lowActivity || {};
@@ -351,7 +349,6 @@
         .gall_writer, .ub-writer, .writer_nikcon { cursor: pointer !important; }
         .gall_writer .nickname, .ub-writer .nickname { display: inline-block; }
         .gall_writer[data-memo-status]:hover .nickname, .ub-writer[data-memo-status]:hover .nickname { font-weight:bold; }
-        .dc-style-lowActivity, .dc-style-scope, .dc-style-memo { color: var(--dc-style-color); }
 
         .dc-modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); backdrop-filter:blur(4px); z-index:999999; display:flex; justify-content:center; align-items:center; opacity:0; animation:modalFadeIn 0.2s forwards; }
         .dc-modal-window { width: 60vw !important; height: 80vh !important; min-width: 800px; min-height: 600px; background:#f8f9fa; border-radius:16px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.5); overflow:hidden; position:relative; transform:scale(0.95); animation:modalPop 0.25s cubic-bezier(0.175,0.885,0.32,1.275) forwards; border: 1px solid #dee2e6; }
