@@ -1,0 +1,1083 @@
+// ==UserScript==
+// @name         DC-User-Notion (V4.9.12 Comment Highlight Fix)
+// @namespace    http://tampermonkey.net/
+// @version      4.9.12
+// @description  [기능 수정] 하이라이터(🖌️) 기능이 댓글란에도 적용되도록 타겟 확장 + 대량 등록/목록 로딩/이미지 확대 기능 유지
+// @author       User (Integrated by Gemini)
+// @match        https://gall.dcinside.com/*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @run-at       document-start
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // [Global Config & DB]
+    const CACHE_KEY = 'dc_memo_mirror_cache';
+    const KEYWORD_KEY = 'dc_memo_radar_keywords';
+    const TAG_KEY = 'dc_memo_custom_tags';
+    const COMMENT_CRITERIA_KEY = 'dc_memo_comment_criteria';
+    const STYLE_SETTINGS_KEY = 'dc_notion_style_settings';
+
+    const DEFAULT_CRITERIA = [10, 20, 30, 60, 90, 120, 170, 220, 270, 320];
+
+    const DEFAULT_STYLE_SETTINGS = {
+        activityThreshold: 100,
+        styles: {
+            lowActivity: { color: '#FF0000', bold: true, strike: false },
+            scope: { color: '#DC3545', bold: true, strike: false },
+            memo: { color: '#2E86FF', bold: false, strike: false }
+        }
+    };
+
+    function loadStyleSettings() {
+        try {
+            const saved = JSON.parse(localStorage.getItem(STYLE_SETTINGS_KEY) || '{}');
+            return {
+                activityThreshold: Number.isFinite(parseInt(saved.activityThreshold, 10)) ? parseInt(saved.activityThreshold, 10) : DEFAULT_STYLE_SETTINGS.activityThreshold,
+                styles: {
+                    lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(saved.styles?.lowActivity || {}) },
+                    scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(saved.styles?.scope || {}) },
+                    memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(saved.styles?.memo || {}) }
+                }
+            };
+        } catch (e) {
+            return JSON.parse(JSON.stringify(DEFAULT_STYLE_SETTINGS));
+        }
+    }
+
+    let StyleSettings = loadStyleSettings();
+    const userActivityCache = {};
+    const userActivityPending = {};
+
+    function saveStyleSettings(nextSettings) {
+        StyleSettings = {
+            activityThreshold: Math.max(0, parseInt(nextSettings.activityThreshold, 10) || DEFAULT_STYLE_SETTINGS.activityThreshold),
+            styles: {
+                lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(nextSettings.styles?.lowActivity || {}) },
+                scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(nextSettings.styles?.scope || {}) },
+                memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(nextSettings.styles?.memo || {}) }
+            }
+        };
+        localStorage.setItem(STYLE_SETTINGS_KEY, JSON.stringify(StyleSettings));
+    }
+
+    function getCookieValue(name) {
+        const matches = document.cookie.match(new RegExp("(?:^|; )" + name.replace(/([\.$?*|{}\(\)\[\]\\\/+^])/g, '\\$1') + "=([^;]*)"));
+        return matches ? decodeURIComponent(matches[1]) : undefined;
+    }
+
+    async function fetchUserActivityTotal(uid) {
+        if (!uid) return null;
+        if (userActivityCache[uid] !== undefined) return userActivityCache[uid];
+        if (userActivityPending[uid]) return userActivityPending[uid];
+
+        userActivityPending[uid] = (async () => {
+            const ci_t = getCookieValue('ci_c');
+            if (!ci_t) return null;
+            try {
+                const response = await fetch('/api/gallog_user_layer/gallog_content_reple/', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest'
+                    },
+                    body: `ci_t=${encodeURIComponent(ci_t)}&user_id=${encodeURIComponent(uid)}`
+                });
+                if (!response.ok) throw new Error('Network response was not ok');
+                const text = await response.text();
+                const parts = text.split(',');
+                if (parts.length >= 2) {
+                    const totalCount = parseInt(parts[0], 10) + parseInt(parts[1], 10);
+                    if (!isNaN(totalCount)) {
+                        userActivityCache[uid] = totalCount;
+                        return totalCount;
+                    }
+                }
+            } catch (e) {
+                console.error('깡계 조회 실패:', e);
+            }
+            return null;
+        })();
+
+        const result = await userActivityPending[uid];
+        delete userActivityPending[uid];
+        return result;
+    }
+
+    function isTemporaryNick(nick, key) {
+        if (!nick) return true;
+        const trimmed = String(nick).trim();
+        if (!trimmed) return true;
+        return trimmed === key || trimmed.startsWith('(임시)');
+    }
+
+    function hasMeaningfulMemoData(cachedData) {
+        if (!cachedData) return false;
+        if (cachedData.uid && String(cachedData.uid).trim()) return true;
+        if (Array.isArray(cachedData.tags) && cachedData.tags.length > 0) return true;
+        if (cachedData.summary && String(cachedData.summary).trim()) return true;
+        if (cachedData.content && String(cachedData.content).replace(/<[^>]*>/g, '').trim()) return true;
+
+        const ignoredKeys = new Set(['nick', 'danger', 'highlight', 'uid', 'tags', 'summary', 'content']);
+        return Object.entries(cachedData).some(([k, v]) => {
+            if (ignoredKeys.has(k)) return false;
+            if (v === null || v === undefined) return false;
+            if (typeof v === 'string') return v.trim().length > 0;
+            if (Array.isArray(v)) return v.length > 0;
+            if (typeof v === 'object') return Object.keys(v).length > 0;
+            return true;
+        });
+    }
+
+    function getFinalCategory(cachedData, uid) {
+        const isScope = !!cachedData?.danger;
+        const isMemoUser = hasMeaningfulMemoData(cachedData);
+        const totalCount = uid ? userActivityCache[uid] : null;
+        const isLowActivity = typeof totalCount === 'number' && totalCount <= StyleSettings.activityThreshold;
+
+        if (isScope) return { category: 'scope', totalCount };
+        if (isLowActivity) return { category: 'lowActivity', totalCount };
+        if (isMemoUser) return { category: 'memo', totalCount };
+        return { category: null, totalCount };
+    }
+
+    function resolveStyleByCategory(category) {
+        if (!category) return null;
+        const cfg = StyleSettings.styles[category];
+        if (!cfg) return null;
+        return { color: cfg.color || '', bold: !!cfg.bold, strike: !!cfg.strike };
+    }
+
+    function applyNicknameStyle(writer, styleObj, totalCount) {
+        const nickEl = writer.querySelector('.nickname') || writer.querySelector('a') || writer.querySelector('em') || writer;
+        if (!nickEl) return;
+
+        if (!nickEl.dataset.originalColor) {
+            nickEl.dataset.originalColor = nickEl.style.color || '';
+            nickEl.dataset.originalWeight = nickEl.style.fontWeight || '';
+            nickEl.dataset.originalStyle = nickEl.style.fontStyle || '';
+            nickEl.dataset.originalTextDecoration = nickEl.style.textDecoration || '';
+        }
+
+        if (styleObj) {
+            nickEl.style.color = styleObj.color || '';
+            nickEl.style.fontWeight = styleObj.bold ? 'bold' : '';
+            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
+            nickEl.style.textDecoration = styleObj.strike ? 'line-through' : '';
+        } else {
+            nickEl.style.color = nickEl.dataset.originalColor || '';
+            nickEl.style.fontWeight = nickEl.dataset.originalWeight || '';
+            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
+            nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
+        }
+
+        if (typeof totalCount === 'number') {
+            writer.title = `글+댓글: ${totalCount}개 (기준 ${StyleSettings.activityThreshold}개 이하)`;
+        } else if (writer.title && writer.title.includes('글+댓글:')) {
+            writer.title = '';
+        }
+    }
+
+    const LEVEL_COLORS = ["#FFFAE0", "#E6F5E8", "#FFF0E0", "#FFE5E5", "#FCE4EC", "#F3E5F5", "#EDE7F6", "#E8EAF6", "#E1F5FE", "#ECEFF1"];
+
+    let GlobalCache = {};
+    try { GlobalCache = JSON.parse(localStorage.getItem(CACHE_KEY) || '{}'); } catch (e) { GlobalCache = {}; }
+
+    let RadarKeywords = [];
+    try { RadarKeywords = JSON.parse(localStorage.getItem(KEYWORD_KEY) || '[]'); } catch (e) { RadarKeywords = []; }
+
+    let CommentCriteria = [];
+    try { CommentCriteria = JSON.parse(localStorage.getItem(COMMENT_CRITERIA_KEY) || JSON.stringify(DEFAULT_CRITERIA)); } catch(e) { CommentCriteria = DEFAULT_CRITERIA; }
+
+    const DB_NAME = 'DC_Memo_System';
+    const DB_VERSION = 10;
+    const STORE_MEMO = 'memos';
+    const STORE_ARCHIVE = 'archives';
+
+    class MemoDB {
+        constructor() { this.db = null; }
+        async init() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open(DB_NAME, DB_VERSION);
+                request.onupgradeneeded = (e) => {
+                    const db = e.target.result;
+                    if (!db.objectStoreNames.contains(STORE_MEMO)) db.createObjectStore(STORE_MEMO);
+                    if (!db.objectStoreNames.contains(STORE_ARCHIVE)) db.createObjectStore(STORE_ARCHIVE);
+                };
+                request.onsuccess = async (e) => { this.db = e.target.result; await this.syncCache(); resolve(); };
+                request.onerror = (e) => { console.error("DB Error:", e); resolve(); };
+            });
+        }
+        async syncCache() {
+            if (!this.db) return;
+            try {
+                const allMemos = await this._getAll(STORE_MEMO);
+                const cacheObj = {};
+                for (const key in allMemos) {
+                    cacheObj[key] = {
+                        nick: allMemos[key].nick || key,
+                        danger: allMemos[key].danger,
+                        highlight: allMemos[key].highlight || false,
+                        uid: allMemos[key].uid || "",
+                        tags: allMemos[key].tags || [],
+                        summary: allMemos[key].summary || "",
+                        content: allMemos[key].content || ""
+                    };
+                }
+                GlobalCache = cacheObj;
+                localStorage.setItem(CACHE_KEY, JSON.stringify(cacheObj));
+                if (typeof window.requestMemoUpdate === 'function') window.requestMemoUpdate(true);
+            } catch (e) { console.error(e); }
+        }
+        async getMemo(key) { return this._get(STORE_MEMO, key); }
+        async saveMemo(key, data) {
+            await this._put(STORE_MEMO, key, data);
+            GlobalCache[key] = {
+                nick: data.nick || key,
+                danger: data.danger,
+                highlight: data.highlight || false,
+                uid: data.uid || "",
+                tags: data.tags || [],
+                summary: data.summary || "",
+                content: data.content || ""
+            };
+            localStorage.setItem(CACHE_KEY, JSON.stringify(GlobalCache));
+            if (typeof window.requestMemoUpdate === 'function') window.requestMemoUpdate(true);
+        }
+        async deleteMemo(key) {
+            await this._delete(STORE_MEMO, key);
+            if (GlobalCache[key]) {
+                delete GlobalCache[key];
+                localStorage.setItem(CACHE_KEY, JSON.stringify(GlobalCache));
+                if (typeof window.requestMemoUpdate === 'function') window.requestMemoUpdate(true);
+            }
+        }
+        async getAllMemos() { return this._getAll(STORE_MEMO); }
+        async getAllArchives() { return this.db && this.db.objectStoreNames.contains(STORE_ARCHIVE) ? this._getAll(STORE_ARCHIVE) : {}; }
+        async _get(storeName, key) { if (!this.db) return null; return new Promise(r => { const tx = this.db.transaction(storeName, 'readonly'); tx.objectStore(storeName).get(key).onsuccess = e => r(e.target.result); tx.onerror = () => r(null); }); }
+        async _put(storeName, key, data) { if (!this.db) return; return new Promise(r => { const tx = this.db.transaction(storeName, 'readwrite'); tx.objectStore(storeName).put(data, key).oncomplete = () => r(); tx.onerror = () => r(); }); }
+        async _delete(storeName, key) { if (!this.db) return; return new Promise(r => { const tx = this.db.transaction(storeName, 'readwrite'); tx.objectStore(storeName).delete(key).oncomplete = () => r(); tx.onerror = () => r(); }); }
+        async _getAll(storeName) { if (!this.db) return {}; return new Promise(r => { const tx = this.db.transaction(storeName, 'readonly'); const s = tx.objectStore(storeName); const v = s.getAll(); const k = s.getAllKeys(); v.onsuccess = () => { k.onsuccess = () => { const res = {}; k.result.forEach((key, i) => res[key] = v.result[i]); r(res); }; }; v.onerror = () => r({}); }); }
+    }
+
+    const memoDB = new MemoDB();
+    const params = new URLSearchParams(window.location.search);
+    let targetKey = params.get('target_key');
+    let targetNick = params.get('target_nick');
+
+    // =================================================================
+    // [2. UI Styling]
+    // =================================================================
+    const MAIN_CSS = `
+        .gall_writer, .ub-writer, .writer_nikcon { cursor: pointer !important; }
+        .gall_writer .nickname, .ub-writer .nickname { display: inline-block; }
+        .gall_writer[data-memo-status]:hover .nickname, .ub-writer[data-memo-status]:hover .nickname { font-weight:bold; }
+
+        .dc-modal-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.75); backdrop-filter:blur(4px); z-index:999999; display:flex; justify-content:center; align-items:center; opacity:0; animation:modalFadeIn 0.2s forwards; }
+        .dc-modal-window { width: 60vw !important; height: 80vh !important; min-width: 800px; min-height: 600px; background:#f8f9fa; border-radius:16px; box-shadow:0 25px 50px -12px rgba(0,0,0,0.5); overflow:hidden; position:relative; transform:scale(0.95); animation:modalPop 0.25s cubic-bezier(0.175,0.885,0.32,1.275) forwards; border: 1px solid #dee2e6; }
+        .dc-modal-iframe { width:100%; height:100%; border:none; display:block; }
+        @keyframes modalFadeIn { to { opacity:1; } } @keyframes modalPop { to { transform:scale(1); } }
+
+        .dc-summary-tooltip { position: fixed; background: rgba(33, 37, 41, 0.95); color: #fff; padding: 8px 12px; border-radius: 6px; font-size: 12px; font-weight: normal; line-height: 1.4; pointer-events: none; z-index: 2147483647; white-space: pre-wrap; box-shadow: 0 4px 15px rgba(0,0,0,0.3); display: none; font-family: "Malgun Gothic", sans-serif; border: 1px solid #495057; max-width: 300px; }
+        .dc-summary-tooltip.show { display: block; }
+
+        tr.dc-bg-lv1 { background-color: #FFFAE0 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv2 { background-color: #E6F5E8 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv3 { background-color: #FFF0E0 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv4 { background-color: #FFE5E5 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv5 { background-color: #FCE4EC !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv6 { background-color: #F3E5F5 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv7 { background-color: #EDE7F6 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv8 { background-color: #E8EAF6 !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv9 { background-color: #E1F5FE !important; box-shadow: none !important; font-weight: bold !important; }
+        tr.dc-bg-lv10 { background-color: #ECEFF1 !important; box-shadow: none !important; font-weight: bold !important; }
+
+        tr.dc-radar-detected { background-color: #ffebee !important; box-shadow: none !important; }
+        tr.dc-radar-detected:hover { background-color: #ffcdd2 !important; }
+        tr.dc-radar-detected td.gall_tit a { color: #d32f2f !important; font-weight: bold !important; }
+
+        /* ✨ Highlight Logic Update (Support Comments) */
+        tr.dc-user-highlight, li.dc-user-highlight { background-color: #E3F2FD !important; box-shadow: none !important; }
+        tr.dc-user-highlight:hover, li.dc-user-highlight:hover { background-color: #BBDEFB !important; }
+        tr.dc-user-highlight td.gall_writer, li.dc-user-highlight .gall_writer { font-weight: bold !important; color: #1565C0 !important; }
+        tr.dc-user-highlight td.gall_tit a, li.dc-user-highlight .gall_tit a { font-weight: bold !important; color: #000 !important; }
+    `;
+
+    const EDITOR_CSS = `
+        :root { --bg-main:#f8f9fa; --bg-sidebar:#ffffff; --bg-hover:#e9ecef; --bg-badge:#e9ecef; --bg-badge-hover:#dee2e6; --text-primary:#212529; --text-secondary:#495057; --border-color:#dee2e6; --editor-bg:#fffdf7; --line-color:#ced4da; }
+        [data-theme="dark"] { --bg-main: #212529; --bg-sidebar: #2c3035; --bg-hover: #343a40; --bg-badge: #343a40; --bg-badge-hover:#495057; --text-primary: #f8f9fa; --text-secondary: #adb5bd; --border-color: #404040; --editor-bg: #2c3035; --line-color: #495057; }
+        * { box-sizing:border-box; -ms-overflow-style:none; scrollbar-width:none; } ::-webkit-scrollbar { display:none; }
+        body { margin:0; padding:0; font-family:"Pretendard",-apple-system,sans-serif; color:var(--text-primary); background:var(--bg-main); height:100vh; overflow:hidden; width: 100%; transition: background 0.2s, color 0.2s; }
+        .main { position:fixed; top:0; left:0; right:0; bottom:0; width:100%; height:100%; overflow-y:auto; display:flex; justify-content:center; background:var(--bg-main); z-index:1; }
+        .editor-container { width:100%; max-width:960px; padding: 80px 40px 40px 40px; display:flex; flex-direction:column; min-height: 100%; box-sizing: border-box; }
+        .header-group { margin-bottom:20px; display:flex; flex-direction:column; gap:12px; align-items:center; padding-bottom:20px; border-bottom:1px solid var(--border-color); flex-shrink: 0; }
+        .title-nick { width: 100%; text-align: center; font-size: 36px; font-weight: 800; color: var(--text-primary); background: transparent; border: none; outline: none; padding: 0; margin: 0; }
+        .id-uid-row { display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 5px; }
+        .info-badge { display: inline-flex; align-items: center; height: 26px; padding: 0 10px; background: #fff; border: 1px solid var(--border-color); border-radius: 6px; font-size: 13px; font-family: monospace; color: var(--text-secondary); box-shadow: 0 1px 2px rgba(0,0,0,0.02); }
+        .info-label { font-weight: 800; margin-right: 6px; color: #adb5bd; font-size: 11px; text-transform: uppercase; }
+        .info-value { font-weight: 600; color: var(--text-primary); }
+        [data-theme="dark"] .info-badge { background: #343a40; border-color: #495057; }
+        .summary-input { width: 100%; max-width: 400px; padding: 8px 12px; border: none; border-bottom: 2px solid var(--border-color); background: transparent; text-align: center; font-size: 14px; color: var(--text-primary); outline: none; transition: border-color 0.2s; margin-bottom: 5px; resize: none; height: 38px; overflow: hidden; font-family: inherit; }
+        .summary-input:focus { border-bottom-color: #2ecc71; height: 60px; }
+        .summary-input::placeholder { color: var(--text-secondary); opacity: 0.5; line-height: 20px; }
+        .meta-row { display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap; margin-top: 5px; }
+        .tag-row { display: flex; align-items: center; justify-content: center; gap: 6px; flex-wrap: wrap; margin-top: 10px; width: 100%; }
+        .tag-btn-item { font-size: 12px; padding: 4px 10px; border-radius: 20px; cursor: pointer; user-select: none; background: var(--bg-main); border: 1px solid var(--border-color); color: var(--text-secondary); transition: all 0.2s; }
+        .tag-btn-item:hover { transform: translateY(-1px); border-color: #aaa; }
+        .tag-btn-item.active { background: #2ecc71; color: white; border-color: #2ecc71; font-weight: bold; box-shadow: 0 2px 5px rgba(46, 204, 113, 0.3); }
+        [data-theme="dark"] .tag-btn-item.active { background: #27ae60; border-color: #27ae60; color: white; }
+        .tag-btn-add { background: var(--bg-badge); font-weight: bold; }
+        [data-theme="dark"] .tag-btn-item { background: #343a40; border-color: #495057; }
+        .badge { display:flex; align-items:center; justify-content:center; width: 36px; height: 36px; padding: 0; background:var(--bg-badge); border-radius:8px; font-size:18px; color:var(--text-secondary); border:1px solid transparent; transition:all 0.2s ease; user-select:none; cursor:default; }
+        .badge:hover { background:var(--bg-badge-hover); color:var(--text-primary); transform: translateY(-1px); }
+        .badge-gallog { cursor:pointer; background:#e3f2fd; color:#1565c0; border:1px solid #bbdefb; font-weight:600; display:none; } .badge-gallog:hover { background:#bbdefb; }
+        [data-theme="dark"] .badge-gallog { background:#1e3a8a; color:#93c5fd; border-color:#1e40af; }
+        .badge-uid { cursor:pointer; background:#f0f4c3; color:#827717; border:1px solid #e6ee9c; font-weight:600; } .badge-uid:hover { background:#e6ee9c; }
+        [data-theme="dark"] .badge-uid { background:#3f4122; color:#dce775; border-color:#5e6134; }
+        .badge-backup { cursor:pointer; background:#fff3e0; color:#e67e22; border:1px solid #ffe0b2; font-weight:600; } .badge-backup:hover { background:#ffe0b2; }
+        [data-theme="dark"] .badge-backup { background:#431407; color:#fdba74; border-color:#7c2d12; }
+        .badge-drive { cursor:pointer; background:#e8f5e9; color:#2e7d32; border:1px solid #c8e6c9; font-weight:600; } .badge-drive:hover { background:#c8e6c9; }
+        [data-theme="dark"] .badge-drive { background:#064e3b; color:#86efac; border-color:#065f46; }
+        .badge-restore { cursor:pointer; background:#f3e5f5; color:#8e24aa; border:1px solid #e1bee7; font-weight:600; } .badge-restore:hover { background:#e1bee7; }
+        [data-theme="dark"] .badge-restore { background:#4a044e; color:#f0abfc; border-color:#701a75; }
+        .badge-comment { cursor:pointer; background:#FFF8E1; color:#F57F17; border:1px solid #FFECB3; font-weight:600; }
+        .badge-comment:hover { background:#FFECB3; }
+        [data-theme="dark"] .badge-comment { background:#422006; color:#FDBA74; border-color:#9a3412; }
+        .badge-highlight { cursor:pointer; background:#E3F2FD; color:#1976D2; border:1px solid #BBDEFB; font-weight:600; }
+        .badge-highlight:hover { background:#BBDEFB; }
+        .highlight-active { background:#2196F3 !important; color:white !important; border-color:#1565C0 !important; box-shadow:0 0 8px rgba(33, 150, 243, 0.5); }
+        [data-theme="dark"] .badge-highlight { background:#1e3a8a; color:#93c5fd; border-color:#1e40af; }
+        [data-theme="dark"] .highlight-active { background:#2563eb !important; color:white !important; }
+        .badge-darkmode { cursor:pointer; }
+        .badge-scope { cursor:pointer; } .scope-active { background:rgba(255,77,79,0.1); color:#DC3545; border-color:rgba(255,77,79,0.3); font-weight:600; }
+        [data-theme="dark"] .scope-active { background:rgba(220, 53, 69, 0.2); color:#ff6b6b; border-color:rgba(220, 53, 69, 0.4); }
+        .badge-keyword { cursor:pointer; background:#fff3e0; color:#ef6c00; border:1px solid #ffe0b2; font-weight:600; }
+        .badge-keyword:hover { background:#ffe0b2; }
+        [data-theme="dark"] .badge-keyword { background:#431407; color:#fb923c; border-color:#7c2d12; }
+        .badge-export { cursor:pointer; } #dangerCheck, #highlightCheck { display:none; }
+
+        .editor { font-size:17px; line-height:24px; white-space:pre-wrap; word-break:break-word; color: var(--text-primary); text-align:center; background: transparent; padding: 20px 4px; outline: none; flex-grow: 1; height: auto; }
+        .editor img { max-height:250px; max-width:100%; border-radius:8px; margin:20px auto; box-shadow:0 8px 20px rgba(0,0,0,0.4); display:block; cursor:zoom-in; }
+        .sidebar { position:fixed; top:0; left:0; height:100%; width:320px; background:var(--bg-sidebar); transform:translateX(-100%); transition:transform 0.3s, background 0.2s; z-index:1000; box-shadow:10px 0 50px rgba(0,0,0,0.1); display:flex; flex-direction:column; border-right:1px solid var(--border-color); }
+        .sidebar.open { transform:translateX(0); }
+        .menu-trigger { position:fixed; top:25px; left:25px; z-index:2000; font-size:24px; color:var(--text-secondary); cursor:pointer; } .menu-trigger:hover { color:var(--text-primary); }
+        .sidebar-header { padding:80px 20px 20px 20px; }
+        .memo-count { margin-bottom: 5px; font-weight: 700; color: #2ecc71; text-align: left; font-size: 14px; display: flex; align-items: center; justify-content: space-between; }
+
+        /* Add User Button */
+        .add-user-btn { cursor:pointer; font-size:18px; color:#333; transition:all 0.2s; margin-left:10px; width:24px; height:24px; display:flex; justify-content:center; align-items:center; border-radius:4px; }
+        .add-user-btn:hover { background:#e9ecef; color:#2ecc71; }
+
+        .memo-hint { font-size: 11px; color: #adb5bd; font-weight: normal; }
+        .search-box { width:100%; padding:14px; border-radius:8px; border:1px solid var(--border-color); background:var(--bg-badge); color:var(--text-primary); outline:none; } .page-list { flex:1; overflow-y:auto; padding:10px 20px; }
+        .page-item { display:flex; justify-content:space-between; padding:12px; cursor:pointer; color:var(--text-secondary); margin-bottom:4px; align-items:center; border-radius:8px; transition:all 0.2s; }
+        .page-item:hover, .page-item.active { background:var(--bg-hover); color:var(--text-primary); }
+        .page-item.deleting { opacity:0; max-height:0; margin-bottom:0; padding-top:0; padding-bottom:0; transform:translateX(-20px); }
+        .page-info { display:flex; gap:10px; align-items:center; overflow:hidden; flex:1; display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+        .page-main-row { display: flex; align-items: center; gap: 8px; width: 100%; }
+        .page-title { font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:140px; }
+        .page-id { font-size:12px; color:var(--text-secondary); font-family:monospace; opacity:0.8; }
+        .page-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+        .tag-badge { font-size: 10px; background: #e3f2fd; color: #1976d2; padding: 2px 6px; border-radius: 4px; border: 1px solid #bbdefb; }
+        [data-theme="dark"] .tag-badge { background: #172554; color: #93c5fd; border-color: #1e3a8a; }
+        .page-actions { display:flex; gap:5px; opacity:0; z-index:10; align-self: flex-start; margin-top: 4px; }
+        .page-item:hover .page-actions { opacity:1; } .action-btn { width:20px; text-align:center; font-size:12px; opacity:0.7; color:var(--text-secondary); } .action-btn:hover { opacity:1; color:var(--text-primary); } .status-indicator { position:fixed; bottom:30px; right:30px; font-size:13px; color:var(--text-secondary); }
+
+        /* ✨ Modal CSS (Unified) */
+        .setting-overlay { position:absolute; top:0; left:0; width:100%; height:100%; background:var(--bg-main); z-index:500; display:flex; flex-direction:column; padding:20px; box-sizing:border-box; }
+        .setting-title { font-size:18px; font-weight:bold; margin-bottom:15px; color:var(--text-primary); text-align:center; }
+        .setting-list { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px; padding-bottom:10px; }
+        .setting-row { display:flex; align-items:center; gap:10px; padding:5px; border-bottom:1px solid var(--border-color); }
+        .setting-label { font-size:13px; font-weight:bold; width:60px; color:var(--text-secondary); }
+        .color-preview { width:20px; height:20px; border-radius:4px; border:1px solid #ddd; }
+        .setting-input { flex:1; padding:6px; border:1px solid var(--border-color); border-radius:4px; background:var(--bg-badge); color:var(--text-primary); font-size:14px; text-align:center; outline:none; }
+        .setting-input:focus { border-color:#2ecc71; }
+        .setting-actions { margin-top:10px; display:flex; gap:10px; justify-content:center; }
+        .setting-btn { padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; font-weight:bold; border:none; color:white; }
+        .btn-save { background:#2ecc71; } .btn-save:hover { background:#27ae60; }
+        .btn-cancel { background:#95a5a6; } .btn-cancel:hover { background:#7f8c8d; }
+        .btn-reset { background:#e74c3c; } .btn-reset:hover { background:#c0392b; }
+
+        /* ✨ Lightbox CSS (Restored) */
+        .lightbox-overlay { position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.85); z-index:3000; display:flex; justify-content:center; align-items:center; cursor:zoom-out; opacity:0; animation:fadeIn 0.2s forwards; }
+        .lightbox-img { max-width:95%; max-height:95%; border-radius:4px; box-shadow:0 20px 50px rgba(0,0,0,0.5); transform:scale(0.95); animation:popIn 0.25s forwards; }
+        @keyframes fadeIn { to { opacity:1; } }
+        @keyframes popIn { to { transform:scale(1); } }
+    `;
+
+    function initEditor(doc, targetKey, targetNick, modalWrapper) {
+        doc.open();
+        // ✨ HTML 수정: 사이드바에 + 버튼 추가
+        doc.write(`<html><head><title>DC Note</title><style>${EDITOR_CSS}</style></head><body>
+            <div class="menu-trigger">☰</div>
+            <div class="sidebar">
+                <div class="sidebar-header">
+                    <div class="memo-count">
+                        <span id="memoCount">...</span>
+                        <div class="add-user-btn" id="addUserBtn" title="식별코드 추가">+</div>
+                    </div>
+                    <input type="text" class="search-box" placeholder="Search...">
+                </div>
+                <div class="page-list" id="pageList"></div>
+            </div>
+            <div class="main">
+                <div class="editor-container">
+                    <div class="header-group">
+                        <input type="text" class="title-nick" id="inputNick" spellcheck="false" placeholder="이름 없음">
+                        <div class="id-uid-row">
+                            <div class="info-badge"><span class="info-label">ID</span><span class="info-value" id="titleIdDisplay">${targetKey}</span></div>
+                            <div class="info-badge" id="uidBadge" style="display:none"><span class="info-label">UID</span><span class="info-value" id="uidDisplay"></span></div>
+                        </div>
+                        <textarea id="inputSummary" class="summary-input" placeholder="한줄 요약" spellcheck="false"></textarea>
+
+                        <div class="meta-row">
+                            <div class="badge badge-gallog" id="gallogBtn" title="갤로그">🏠</div>
+                            <label class="badge badge-highlight" id="highlightLabel" title="유저 강조 (파란 배경)"><input type="checkbox" id="highlightCheck"><span>🖌️</span></label>
+                            <label class="badge badge-scope" id="scopeLabel" title="스코프 (위험)"><input type="checkbox" id="dangerCheck"><span>🎯</span></label>
+                            <div class="badge badge-uid" id="uidBtn" title="UID 입력">💳</div>
+                            <div class="badge badge-comment" id="commentBtn" title="댓글 컷 설정">💬</div>
+                            <div class="badge badge-comment" id="styleBtn" title="닉네임 스타일 설정">🎨</div>
+                            <div class="badge badge-keyword" id="keywordBtn" title="키워드 알림">🔔</div>
+                            <div class="badge badge-export" id="exportBtn" title="HTML 추출">📥</div>
+                            <div class="badge badge-backup" id="fileBackupBtn" title="백업">💾</div>
+                            <div class="badge badge-restore" id="fileRestoreBtn" title="복원">📂</div>
+                            <div class="badge badge-drive" id="cloudBackupBtn" title="구글 연동">☁️</div>
+                            <div class="badge badge-darkmode" id="darkModeBtn" title="다크 모드">🌙</div>
+                        </div>
+                        <div class="tag-row" id="tagRow"></div>
+                    </div>
+                    <div class="editor" contenteditable="true" id="editor"></div>
+                </div>
+
+                <div id="settingOverlay" class="setting-overlay" style="display:none;"></div>
+            </div>
+            <div class="status-indicator" id="statusText">Loading...</div>
+            <input type="file" id="restoreInput" accept=".json" style="display:none;">
+        </body></html>`);
+        doc.close();
+
+        // Elements
+        const inputNick = doc.getElementById('inputNick');
+        const inputSummary = doc.getElementById('inputSummary');
+        const editor = doc.getElementById('editor');
+        const dangerCheck = doc.getElementById('dangerCheck');
+        const scopeLabel = doc.getElementById('scopeLabel');
+        const highlightCheck = doc.getElementById('highlightCheck');
+        const highlightLabel = doc.getElementById('highlightLabel');
+        const statusText = doc.getElementById('statusText');
+        const searchBox = doc.querySelector('.search-box');
+        const gallogBtn = doc.getElementById('gallogBtn');
+        const sidebar = doc.querySelector('.sidebar');
+        const sidebarHeader = doc.querySelector('.sidebar-header');
+        const pageList = doc.getElementById('pageList');
+        const restoreInput = doc.getElementById('restoreInput');
+        const titleIdDisplay = doc.getElementById('titleIdDisplay');
+        const memoCount = doc.getElementById('memoCount');
+        const darkModeBtn = doc.getElementById('darkModeBtn');
+        const tagRow = doc.getElementById('tagRow');
+        const uidBtn = doc.getElementById('uidBtn');
+        const uidDisplay = doc.getElementById('uidDisplay');
+        const uidBadge = doc.getElementById('uidBadge');
+        const settingOverlay = doc.getElementById('settingOverlay');
+        const addUserBtn = doc.getElementById('addUserBtn');
+        const styleBtn = doc.getElementById('styleBtn');
+
+        // ✨ [NEW] Single Add Logic
+        addUserBtn.onclick = async () => {
+            const newId = prompt('추가할 식별코드(ID 또는 IP)를 입력하세요:');
+            if (newId === null) return;
+            const key = newId.trim();
+            if (!key) {
+                alert('식별코드를 입력하세요.');
+                return;
+            }
+
+            let existing = await memoDB.getMemo(key);
+            if (!existing) {
+                existing = { content: "", nick: `(임시) ${key}`, danger: false, highlight: false, tags: [], uid: "", summary: "" };
+            } else if (!existing.nick || !String(existing.nick).trim()) {
+                existing.nick = `(임시) ${key}`;
+            }
+            await memoDB.saveMemo(key, existing);
+
+            settingOverlay.style.display = 'none';
+            await renderSidebar(searchBox.value);
+            await loadMemoData(key, existing.nick || `(임시) ${key}`);
+        };
+
+
+        styleBtn.onclick = () => {
+            const sLow = StyleSettings.styles.lowActivity;
+            const sScope = StyleSettings.styles.scope;
+            const sMemo = StyleSettings.styles.memo;
+            const html = `
+                <div class="setting-title">닉네임 스타일 설정</div>
+                <div class="setting-list">
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 기준</span><input id="activityThresholdInput" type="number" class="setting-input" value="${StyleSettings.activityThreshold}"></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 색상</span><input id="lowColor" type="color" class="setting-input" value="${sLow.color}" style="padding:2px;"><label><input id="lowBold" type="checkbox" ${sLow.bold ? 'checked' : ''}>Bold</label><label><input id="lowStrike" type="checkbox" ${sLow.strike ? 'checked' : ''}>Strike</label></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">스코프 색상</span><input id="scopeColor" type="color" class="setting-input" value="${sScope.color}" style="padding:2px;"><label><input id="scopeBold" type="checkbox" ${sScope.bold ? 'checked' : ''}>Bold</label><label><input id="scopeStrike" type="checkbox" ${sScope.strike ? 'checked' : ''}>Strike</label></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">메모유저 색상</span><input id="memoColor" type="color" class="setting-input" value="${sMemo.color}" style="padding:2px;"><label><input id="memoBold" type="checkbox" ${sMemo.bold ? 'checked' : ''}>Bold</label><label><input id="memoStrike" type="checkbox" ${sMemo.strike ? 'checked' : ''}>Strike</label></div>
+                </div>
+                <div class="setting-actions">
+                    <button class="setting-btn btn-save" id="saveStyleBtn">저장</button>
+                    <button class="setting-btn btn-cancel" id="cancelStyleBtn">취소</button>
+                </div>`;
+            settingOverlay.innerHTML = html;
+            settingOverlay.style.display = 'flex';
+            doc.getElementById('cancelStyleBtn').onclick = () => { settingOverlay.style.display = 'none'; };
+            doc.getElementById('saveStyleBtn').onclick = () => {
+                saveStyleSettings({
+                    activityThreshold: doc.getElementById('activityThresholdInput').value,
+                    styles: {
+                        lowActivity: { color: doc.getElementById('lowColor').value, bold: doc.getElementById('lowBold').checked, strike: doc.getElementById('lowStrike').checked },
+                        scope: { color: doc.getElementById('scopeColor').value, bold: doc.getElementById('scopeBold').checked, strike: doc.getElementById('scopeStrike').checked },
+                        memo: { color: doc.getElementById('memoColor').value, bold: doc.getElementById('memoBold').checked, strike: doc.getElementById('memoStrike').checked }
+                    }
+                });
+                settingOverlay.style.display = 'none';
+                renderSidebar(searchBox.value);
+                if (typeof window.requestMemoUpdate === 'function') window.requestMemoUpdate(true);
+            };
+        };
+
+        // Keyword Logic
+        const keywordBtn = doc.getElementById('keywordBtn');
+        keywordBtn.onclick = () => {
+            const current = JSON.parse(localStorage.getItem(KEYWORD_KEY) || '[]');
+            const input = prompt("알림 받을 키워드를 쉼표(,)로 구분해 입력하세요:\n현재: " + current.join(', '), current.join(', '));
+            if (input !== null) {
+                const newList = input.split(',').map(s => s.trim()).filter(s => s.length > 0);
+                localStorage.setItem(KEYWORD_KEY, JSON.stringify(newList));
+                RadarKeywords = newList;
+                alert("✅ 키워드 저장됨: " + newList.join(', '));
+                window.parent.postMessage({ type: 'DC_RELOAD_KEYWORDS' }, '*');
+            }
+        };
+
+        // Comment Cut Setting
+        const commentBtn = doc.getElementById('commentBtn');
+        const levelColors = ["#FFFAE0", "#E6F5E8", "#FFF0E0", "#FFE5E5", "#FCE4EC", "#F3E5F5", "#EDE7F6", "#E8EAF6", "#E1F5FE", "#ECEFF1"];
+
+        commentBtn.onclick = () => {
+            const currentCriteria = JSON.parse(localStorage.getItem(COMMENT_CRITERIA_KEY) || JSON.stringify([10,20,30,60,90,120,170,220,270,320]));
+            let html = `<div class="setting-title">댓글 하이라이트 설정</div><div class="setting-list">`;
+            for(let i=0; i<10; i++) {
+                html += `
+                    <div class="setting-row">
+                        <div class="color-preview" style="background:${LEVEL_COLORS[i]}"></div>
+                        <span class="setting-label">LV.${i+1}</span>
+                        <input type="number" class="setting-input" id="crit_${i}" value="${currentCriteria[i]}">
+                    </div>
+                `;
+            }
+            html += `</div><div class="setting-actions"><button class="setting-btn btn-save" id="saveCritBtn">저장</button><button class="setting-btn btn-reset" id="resetCritBtn">초기화</button><button class="setting-btn btn-cancel" id="cancelCritBtn">취소</button></div>`;
+            settingOverlay.innerHTML = html;
+            settingOverlay.style.display = 'flex';
+
+            doc.getElementById('cancelCritBtn').onclick = () => { settingOverlay.style.display = 'none'; };
+            doc.getElementById('resetCritBtn').onclick = () => { const defaults = [10,20,30,60,90,120,170,220,270,320]; for(let i=0; i<10; i++) doc.getElementById(`crit_${i}`).value = defaults[i]; };
+            doc.getElementById('saveCritBtn').onclick = () => {
+                const newCriteria = [];
+                for(let i=0; i<10; i++) { const val = parseInt(doc.getElementById(`crit_${i}`).value, 10); newCriteria.push(isNaN(val) ? 0 : val); }
+                localStorage.setItem(COMMENT_CRITERIA_KEY, JSON.stringify(newCriteria));
+                CommentCriteria = newCriteria;
+                alert("✅ 설정이 저장되었습니다.");
+                settingOverlay.style.display = 'none';
+                window.parent.postMessage({ type: 'DC_RELOAD_CRITERIA' }, '*');
+            };
+        };
+
+        const themeKey = 'dc_memo_theme';
+        function applyTheme(theme) {
+            doc.documentElement.setAttribute('data-theme', theme);
+            localStorage.setItem(themeKey, theme);
+            darkModeBtn.innerHTML = theme === 'dark' ? '☀️' : '🌙';
+            if (modalWrapper) {
+                if (theme === 'dark') {
+                    modalWrapper.style.border = 'none';
+                    modalWrapper.style.boxShadow = '0 25px 50px -12px rgba(0,0,0,0.8)';
+                } else {
+                    modalWrapper.style.border = '1px solid #dee2e6';
+                    modalWrapper.style.boxShadow = '0 25px 50px -12px rgba(0,0,0,0.5)';
+                }
+            }
+        }
+        const savedTheme = localStorage.getItem(themeKey) || 'light';
+        applyTheme(savedTheme);
+        darkModeBtn.onclick = () => {
+            const current = doc.documentElement.getAttribute('data-theme');
+            applyTheme(current === 'dark' ? 'light' : 'dark');
+        };
+
+        // Tags Logic
+        let customTags = JSON.parse(localStorage.getItem(TAG_KEY) || '["#거래", "#어그로", "#지인"]');
+        let currentTagList = [];
+        let currentUidValue = "";
+
+        function saveTagsConfig() { localStorage.setItem(TAG_KEY, JSON.stringify(customTags)); }
+
+        function renderTags() {
+            tagRow.innerHTML = '';
+            customTags.forEach(tag => {
+                const btn = doc.createElement('div');
+                btn.className = 'tag-btn-item';
+                btn.textContent = tag;
+                btn.onclick = () => {
+                    const idx = currentTagList.indexOf(tag);
+                    if (idx > -1) { currentTagList.splice(idx, 1); btn.classList.remove('active'); }
+                    else { currentTagList.push(tag); btn.classList.add('active'); }
+                    performSave();
+                };
+                btn.oncontextmenu = (e) => {
+                    e.preventDefault();
+                    if(confirm(`[${tag}] 삭제?`)) {
+                        customTags = customTags.filter(t => t !== tag);
+                        saveTagsConfig();
+                        renderTags();
+                        if(currentTagList.includes(tag)) {
+                            currentTagList = currentTagList.filter(t => t !== tag);
+                            performSave();
+                        }
+                    }
+                };
+                if(currentTagList.includes(tag)) btn.classList.add('active');
+                tagRow.appendChild(btn);
+            });
+            const addBtn = doc.createElement('div');
+            addBtn.className = 'tag-btn-item tag-btn-add';
+            addBtn.textContent = '+';
+            addBtn.onclick = () => {
+                const newTag = prompt('새 태그 입력 (예: #주의)');
+                if (newTag) {
+                    const formatted = newTag.startsWith('#') ? newTag : '#' + newTag;
+                    if (!customTags.includes(formatted)) {
+                        customTags.push(formatted);
+                        saveTagsConfig();
+                        renderTags();
+                    }
+                }
+            };
+            tagRow.appendChild(addBtn);
+        }
+
+        // Auto Tag Logic
+        function updateAutoTags() {
+            const toggleTag = (tag, isActive) => {
+                const idx = currentTagList.indexOf(tag);
+                if (isActive) {
+                    if (idx === -1) currentTagList.push(tag);
+                } else {
+                    if (idx > -1) currentTagList.splice(idx, 1);
+                }
+            };
+            toggleTag('#강조', highlightCheck.checked);
+            toggleTag('#스코프', dangerCheck.checked);
+            toggleTag('#UID', !!currentUidValue);
+        }
+
+        let currentTargetKey = targetKey;
+        let memoKeys = [];
+        let renderRequestId = 0;
+
+        async function loadMemoData(key, nick) {
+            currentTargetKey = key;
+            statusText.textContent = "Loading...";
+
+            let data = await memoDB.getMemo(key);
+            if (!data) data = { content: "", nick: nick || key, danger: false, highlight: false, tags: [], uid: "", summary: "" };
+            if (!data.nick && nick) data.nick = nick;
+
+            inputNick.value = data.nick;
+            inputSummary.value = data.summary || "";
+            editor.innerHTML = data.content;
+            dangerCheck.checked = data.danger || false;
+            highlightCheck.checked = data.highlight || false;
+
+            currentUidValue = data.uid || "";
+            if (currentUidValue) {
+                uidDisplay.textContent = currentUidValue;
+                uidBadge.style.display = 'inline-flex';
+            } else {
+                uidBadge.style.display = 'none';
+            }
+
+            currentTagList = data.tags || [];
+            updateAutoTags();
+            renderTags();
+
+            titleIdDisplay.textContent = key;
+
+            if (dangerCheck.checked) scopeLabel.classList.add('scope-active');
+            else scopeLabel.classList.remove('scope-active');
+
+            if (highlightCheck.checked) highlightLabel.classList.add('highlight-active');
+            else highlightLabel.classList.remove('highlight-active');
+
+            const isIP = /^\d{1,3}\.\d{1,3}$/.test(key);
+            if (!isIP && key.length > 0) {
+                gallogBtn.style.display = 'flex';
+                gallogBtn.onclick = () => { window.open(`https://gallog.dcinside.com/${key}`, '_blank'); };
+            } else {
+                gallogBtn.style.display = 'none';
+            }
+
+            statusText.textContent = "Ready";
+            updateSidebarSelection(key);
+        }
+
+        function updateSidebarSelection(key) {
+            const oldActive = doc.querySelector('.page-item.active');
+            if(oldActive) oldActive.classList.remove('active');
+
+            const newActive = doc.querySelector(`.page-item[data-key="${key}"]`);
+            if(newActive) {
+                newActive.classList.add('active');
+                newActive.scrollIntoView({ block: "center", behavior: "smooth" });
+            }
+        }
+
+        loadMemoData(targetKey, targetNick);
+
+        doc.querySelector('.menu-trigger').onclick = () => sidebar.classList.toggle('open');
+        doc.addEventListener('click', (e) => {
+            if (sidebar.classList.contains('open') && !sidebar.contains(e.target) && !doc.querySelector('.menu-trigger').contains(e.target)) sidebar.classList.remove('open');
+        });
+
+        function switchUserByWheel(e) {
+            if (memoKeys.length < 2) return;
+            e.preventDefault(); e.stopPropagation();
+            const currentIndex = memoKeys.indexOf(currentTargetKey);
+            if (currentIndex === -1) return;
+            let nextIndex = (e.deltaY > 0) ? (currentIndex + 1) % memoKeys.length : (currentIndex - 1 + memoKeys.length) % memoKeys.length;
+            const nextKey = memoKeys[nextIndex];
+            memoDB.getMemo(nextKey).then(data => { loadMemoData(nextKey, data ? data.nick : nextKey); });
+        }
+
+        sidebarHeader.addEventListener('wheel', (e) => { switchUserByWheel(e); }, { passive: false });
+        pageList.addEventListener('wheel', (e) => { if (e.altKey) { switchUserByWheel(e); } }, { passive: false });
+
+        // ✨ Lightbox Handler (Added Back)
+        editor.addEventListener('click', async (e) => {
+            if (e.target.tagName === 'IMG') {
+                const overlay = doc.createElement('div'); overlay.className = 'lightbox-overlay';
+                overlay.innerHTML = `<img src="${e.target.src}" class="lightbox-img">`;
+                overlay.onclick = () => overlay.remove();
+                doc.body.appendChild(overlay);
+            }
+        });
+
+        doc.getElementById('fileBackupBtn').onclick = async () => {
+            if(!confirm('전체 백업?')) return;
+            const allMemos = await memoDB.getAllMemos();
+            const backupData = { date: new Date().toLocaleString(), memos: allMemos };
+            const blob = new Blob([JSON.stringify(backupData)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = doc.createElement('a'); a.href = url; a.download = `DC_Note_Backup_${new Date().toISOString().slice(0,10)}.json`;
+            doc.body.appendChild(a); a.click(); doc.body.removeChild(a);
+        };
+
+        doc.getElementById('cloudBackupBtn').onclick = async () => {
+            const cloudBtn = doc.getElementById('cloudBackupBtn');
+            let gasUrl = GM_getValue('gas_url', '');
+            if (!gasUrl) { gasUrl = prompt('GAS URL:'); if (gasUrl) { GM_setValue('gas_url', gasUrl.trim()); } else return; }
+            if(!confirm('구글 백업?')) return;
+            cloudBtn.innerText = '⏳';
+            const allMemos = await memoDB.getAllMemos();
+            const backupData = { date: new Date().toLocaleString(), memos: allMemos };
+            GM_xmlhttpRequest({
+                method: "POST", url: gasUrl, data: JSON.stringify(backupData), headers: { "Content-Type": "application/json" }, anonymous: true,
+                onload: (r) => { if (r.responseText.includes("SUCCESS")) alert('✅ 완료'); else alert('❌ 실패: '+r.responseText); cloudBtn.innerHTML = '☁️'; },
+                onerror: () => { alert('❌'); cloudBtn.innerHTML = '☁️'; }
+            });
+        };
+
+        doc.getElementById('fileRestoreBtn').onclick = () => { if(confirm('덮어씌웁니다?')) restoreInput.click(); };
+        restoreInput.onchange = (e) => {
+            const file = e.target.files[0]; if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (evt) => {
+                try {
+                    const data = JSON.parse(evt.target.result);
+                    if (!data.memos) throw new Error('Invalid File');
+                    for (const key in data.memos) await memoDB.saveMemo(key, data.memos[key]);
+                    alert(`✅ 복원 (${data.date})`); loadMemoData(currentTargetKey, inputNick.value);
+                } catch (err) { alert('❌ ' + err.message); }
+            };
+            reader.readAsText(file);
+        };
+
+        doc.getElementById('exportBtn').onclick = () => { const scopeTag = dangerCheck.checked ? '<div class="badge scope-active">🎯 SCOPE</div>' : ''; const htmlContent = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${inputNick.value}</title><style>${EDITOR_CSS} body{overflow:auto} .editor-container{padding-top:60px} .main{position:relative;height:auto} .lightbox-overlay{display:none} </style></head><body class="${doc.body.className}"><div class="main"><div class="editor-container"><div class="header-group"><div class="title-nick">${inputNick.value}</div><div class="id-sub-text">🆔 ${currentTargetKey}</div><div class="meta-row">${scopeTag}</div></div><div class="editor">${editor.innerHTML}</div></div></div><div id="lightbox" class="lightbox-overlay"></div><script>const l=document.getElementById('lightbox');document.addEventListener('click',e=>{if(e.target.tagName==='IMG'&&!e.target.classList.contains('lightbox-img')){l.innerHTML='<img src="'+e.target.src+'" class="lightbox-img">';l.style.display='flex'}});l.onclick=()=>{l.style.display='none';l.innerHTML=''}<\/script></body></html>`; const blob = new Blob([htmlContent], { type: 'text/html' }); const url = URL.createObjectURL(blob); const a = doc.createElement('a'); a.href = url; a.download = `Note_${inputNick.value}.html`; doc.body.appendChild(a); a.click(); doc.body.removeChild(a); URL.revokeObjectURL(url); };
+
+        async function renderSidebar(filter = "") {
+            const currentId = ++renderRequestId;
+            const allMemos = await memoDB.getAllMemos();
+            if (currentId !== renderRequestId) return;
+
+            pageList.innerHTML = '';
+            const keys = Object.keys(allMemos).sort((a, b) => (allMemos[a].nick || a).localeCompare(allMemos[b].nick || b));
+
+            memoKeys = keys.filter(key => {
+                if (!filter) return true;
+                const data = allMemos[key];
+                const hasTag = data.tags && data.tags.some(t => t.includes(filter));
+                return data.nick.includes(filter) || key.includes(filter) || (data.content && data.content.includes(filter)) || hasTag;
+            });
+
+            if (memoCount) memoCount.innerText = `📝 저장: ${keys.length}명`;
+
+            memoKeys.forEach(key => {
+                const data = allMemos[key];
+                const item = doc.createElement('div');
+                item.className = `page-item ${key === currentTargetKey ? 'active' : ''}`;
+                item.setAttribute('data-key', key);
+
+                if (data.danger) item.classList.add('danger');
+                const tags = (data.tags || []).map(t => `<span class="tag-badge">${t}</span>`).join('');
+                const category = getFinalCategory(data, key).category;
+                const sideStyle = resolveStyleByCategory(category);
+                const titleStyle = sideStyle ? `style="color:${sideStyle.color};font-weight:${sideStyle.bold ? 'bold' : 'normal'};text-decoration:${sideStyle.strike ? 'line-through' : 'none'};"` : '';
+
+                const info = doc.createElement('div'); info.className = 'page-info';
+                info.innerHTML = `<div class="page-main-row"><span class="page-title" ${titleStyle}>${data.nick||key}</span><span class="page-id">(${key})</span></div>${tags ? `<div class="page-tags">${tags}</div>` : ''}`;
+                info.onclick = () => { loadMemoData(key, data.nick); };
+                const actions = doc.createElement('div'); actions.className = 'page-actions';
+                const editBtn = doc.createElement('div'); editBtn.className = 'action-btn'; editBtn.innerHTML = '✏️'; editBtn.onclick = async (e) => { e.stopPropagation(); const newNick = prompt("이름 변경:", data.nick||key); if (newNick) { data.nick = newNick; await memoDB.saveMemo(key, data); if (key === currentTargetKey) inputNick.value = newNick; renderSidebar(searchBox.value); } };
+                const delBtn = doc.createElement('div'); delBtn.className = 'action-btn'; delBtn.innerHTML = '🗑️'; delBtn.onclick = (e) => { e.stopPropagation(); if (confirm("삭제?")) { item.classList.add('deleting'); setTimeout(() => item.remove(), 250); memoDB.deleteMemo(key).then(() => { if (key === currentTargetKey) { loadMemoData(key, data.nick); } }); } };
+                actions.append(editBtn, delBtn); item.append(info, actions); pageList.appendChild(item);
+            });
+        }
+        renderSidebar();
+        searchBox.addEventListener('input', (e) => renderSidebar(e.target.value));
+
+        const performSave = async () => {
+            const content = editor.innerHTML;
+            const isDanger = dangerCheck.checked;
+            const isHighlight = highlightCheck.checked;
+
+            if (isDanger) scopeLabel.classList.add('scope-active'); else scopeLabel.classList.remove('scope-active');
+            if (isHighlight) highlightLabel.classList.add('highlight-active'); else highlightLabel.classList.remove('highlight-active');
+
+            const uidValue = currentUidValue;
+            const summaryValue = inputSummary.value.trim();
+
+            if (!content && !editor.querySelector('img') && !isDanger && !isHighlight && currentTagList.length === 0 && !uidValue && !summaryValue) {
+                await memoDB.deleteMemo(currentTargetKey); statusText.innerText = "Deleted";
+            } else {
+                updateAutoTags();
+                await memoDB.saveMemo(currentTargetKey, {
+                    content: content, nick: inputNick.value, danger: isDanger, highlight: isHighlight,
+                    tags: currentTagList, uid: uidValue, summary: summaryValue
+                });
+                statusText.innerText = "Saved";
+            }
+            setTimeout(() => statusText.innerText = "", 1000);
+            renderTags();
+            renderSidebar(searchBox.value);
+        };
+        let saveTimeout; const debouncedSave = () => { clearTimeout(saveTimeout); saveTimeout = setTimeout(performSave, 500); };
+        inputNick.addEventListener('input', () => { debouncedSave(); });
+        inputSummary.addEventListener('input', debouncedSave);
+        uidBtn.onclick = () => { const newUid = prompt("UID:", currentUidValue); if (newUid !== null) { currentUidValue = newUid.trim(); uidDisplay.textContent = currentUidValue; uidBadge.style.display = currentUidValue ? 'inline-flex' : 'none'; performSave(); } };
+
+        editor.addEventListener('input', debouncedSave);
+        dangerCheck.addEventListener('change', performSave);
+        highlightCheck.addEventListener('change', performSave);
+        window.addEventListener('beforeunload', performSave);
+        editor.addEventListener('paste', (e) => { const items = (e.clipboardData || e.originalEvent.clipboardData).items; for (let i = 0; i < items.length; i++) { if (items[i].type.indexOf("image") === 0) { e.preventDefault(); const reader = new FileReader(); reader.onload = (evt) => { doc.execCommand('insertHTML', false, `<img src="${evt.target.result}">`); performSave(); }; reader.readAsDataURL(items[i].getAsFile()); break; } } });
+    }
+
+    function main() {
+        const style = document.createElement('style'); style.textContent = MAIN_CSS; document.head.appendChild(style);
+        const tooltip = document.createElement('div'); tooltip.className = 'dc-summary-tooltip'; document.body.appendChild(tooltip);
+
+        window.openDCMemoModal = (key, nick) => {
+            const existing = document.querySelector('.dc-modal-overlay'); if (existing) existing.remove();
+            const overlay = document.createElement('div'); overlay.className = 'dc-modal-overlay';
+            const modal = document.createElement('div'); modal.className = 'dc-modal-window';
+            const iframe = document.createElement('iframe'); iframe.className = 'dc-modal-iframe';
+            modal.appendChild(iframe); overlay.appendChild(modal); document.body.appendChild(overlay);
+            overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+            initEditor(iframe.contentDocument || iframe.contentWindow.document, key, nick, modal);
+        };
+
+        document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { const existing = document.querySelector('.dc-modal-overlay'); if (existing) existing.remove(); } });
+        document.addEventListener('mousemove', (e) => { if (tooltip.classList.contains('show')) { tooltip.style.left = (e.clientX + 30) + 'px'; tooltip.style.top = (e.clientY + 40) + 'px'; } });
+
+        let markerNeedsFullRefresh = false;
+        let markerScheduled = false;
+        let keywordCheckPending = false;
+        let criteriaRefreshPending = false;
+
+        const scheduleMarkerUpdate = (fullRefresh = false) => {
+            if (fullRefresh) markerNeedsFullRefresh = true;
+            if (markerScheduled) return;
+            markerScheduled = true;
+            requestAnimationFrame(() => {
+                markerScheduled = false;
+                updateMarkers(markerNeedsFullRefresh || criteriaRefreshPending);
+                markerNeedsFullRefresh = false;
+                criteriaRefreshPending = false;
+            });
+        };
+
+        const scheduleKeywordCheck = () => {
+            if (keywordCheckPending) return;
+            keywordCheckPending = true;
+            requestAnimationFrame(() => {
+                keywordCheckPending = false;
+                checkKeywords();
+            });
+        };
+
+        window.requestMemoUpdate = (fullRefresh = false) => {
+            scheduleMarkerUpdate(fullRefresh);
+            if (RadarKeywords.length) scheduleKeywordCheck();
+        };
+
+        window.addEventListener('message', (e) => {
+            if(e.data && e.data.type === 'DC_RELOAD_KEYWORDS') {
+                try { RadarKeywords = JSON.parse(localStorage.getItem(KEYWORD_KEY) || '[]'); } catch(e){}
+                scheduleKeywordCheck();
+            }
+            if(e.data && e.data.type === 'DC_RELOAD_CRITERIA') {
+                try { CommentCriteria = JSON.parse(localStorage.getItem(COMMENT_CRITERIA_KEY) || JSON.stringify(DEFAULT_CRITERIA)); } catch(e){}
+                criteriaRefreshPending = true;
+                scheduleMarkerUpdate(true);
+            }
+        });
+
+        const processedLevels = new WeakSet();
+
+        function applyCommentHighlight(row) {
+            if (!row || row.tagName !== 'TR' || processedLevels.has(row)) return;
+            const replySpan = row.querySelector('.reply_num');
+            if(!replySpan) return;
+            const count = parseInt(replySpan.innerText.replace(/[\[\]]/g, ''), 10);
+            if (isNaN(count)) return;
+            for(let i = 9; i >= 0; i--) {
+                if(count >= CommentCriteria[i]) {
+                    row.classList.add(`dc-bg-lv${i+1}`);
+                    break;
+                }
+            }
+            processedLevels.add(row);
+        }
+
+        function syncWriterState(writer, cachedData, row, forceRefresh) {
+            if (cachedData) {
+                if (cachedData.danger) writer.setAttribute('data-memo-status', 'danger');
+                else writer.setAttribute('data-memo-status', 'active');
+                if (cachedData.summary) writer.setAttribute('data-memo-summary', cachedData.summary);
+                else if (forceRefresh) writer.removeAttribute('data-memo-summary');
+
+                if (cachedData.highlight && row) {
+                    row.classList.add('dc-user-highlight');
+                } else if (forceRefresh && row) {
+                    row.classList.remove('dc-user-highlight');
+                }
+            } else if (forceRefresh) {
+                writer.removeAttribute('data-memo-status');
+                writer.removeAttribute('data-memo-summary');
+                if (row) row.classList.remove('dc-user-highlight');
+            }
+        }
+
+        function updateMarkers(forceRefresh = false) {
+            const selector = forceRefresh
+                ? '.gall_writer, .ub-writer, .writer_nikcon'
+                : '.gall_writer:not([data-memo-injected]), .ub-writer:not([data-memo-injected]), .writer_nikcon:not([data-memo-injected])';
+            const writers = document.querySelectorAll(selector);
+            if (!writers.length && !forceRefresh) return;
+
+            writers.forEach(writer => {
+                if (!forceRefresh) writer.dataset.memoInjected = "true";
+                const uid = writer.getAttribute('data-uid') || writer.closest('[data-uid]')?.getAttribute('data-uid');
+                const ip = writer.getAttribute('data-ip') || writer.closest('[data-ip]')?.getAttribute('data-ip');
+                const key = uid || ip;
+
+                // ✨ [Smart Nickname Update Logic]
+                const currentNick = writer.getAttribute('data-nick');
+                if (key && currentNick) {
+                    const cachedData = GlobalCache[key];
+                    // 캐시 닉네임이 임시 상태면(식별코드 동일 또는 '(임시)' 시작) -> 진짜 닉네임으로 업데이트
+                    if (cachedData && isTemporaryNick(cachedData.nick, key) && currentNick !== key) {
+                        cachedData.nick = currentNick; // 캐시 즉시 반영
+                        GlobalCache[key] = cachedData;
+                        memoDB.getMemo(key).then(data => {
+                            if(data) {
+                                data.nick = currentNick;
+                                memoDB.saveMemo(key, data); // DB 저장 (비동기)
+                            }
+                        });
+                    }
+                }
+
+                // ✨ Row Detection: Table Row OR Comment Content Box
+                const row = writer.closest('tr') || writer.closest('.ub-content');
+                const cachedData = key ? GlobalCache[key] : null;
+
+                syncWriterState(writer, cachedData, row, forceRefresh);
+                const finalInfo = getFinalCategory(cachedData, uid);
+                applyNicknameStyle(writer, resolveStyleByCategory(finalInfo.category), finalInfo.totalCount);
+
+                if (uid && userActivityCache[uid] === undefined && !writer.dataset.activityRequested) {
+                    writer.dataset.activityRequested = 'true';
+                    fetchUserActivityTotal(uid).then(() => {
+                        if (typeof window.requestMemoUpdate === 'function') window.requestMemoUpdate(true);
+                    });
+                }
+
+                if (row && row.tagName === 'TR') {
+                    if (forceRefresh) processedLevels.delete(row);
+                    applyCommentHighlight(row);
+                }
+            });
+
+            if (RadarKeywords.length) scheduleKeywordCheck();
+        }
+
+        function checkKeywords() {
+            if (RadarKeywords.length === 0) return;
+            const titles = document.querySelectorAll('.gall_tit a:not([data-radar-checked]), .ub-word a:not([data-radar-checked])');
+            if (!titles.length) return;
+            titles.forEach(title => {
+                title.dataset.radarChecked = "true";
+                const text = title.textContent;
+                if (RadarKeywords.some(k => text.includes(k))) {
+                    const row = title.closest('tr');
+                    if (row) row.classList.add('dc-radar-detected');
+                }
+            });
+        }
+
+        memoDB.init().then(() => {
+            document.body.addEventListener('dblclick', (e) => {
+                const targetWriter = e.target.closest('.gall_writer, .ub-writer, .writer_nikcon');
+                if (targetWriter) {
+                    const uid = targetWriter.getAttribute('data-uid'); const ip = targetWriter.getAttribute('data-ip'); const nick = targetWriter.getAttribute('data-nick'); const key = uid || ip;
+                    if (key) {
+                        e.preventDefault(); e.stopPropagation();
+                        if (window.getSelection) window.getSelection().removeAllRanges();
+                        window.openDCMemoModal(key, nick);
+                    }
+                }
+            }, true);
+
+            document.addEventListener('mouseover', (e) => {
+                const writer = e.target.closest('.gall_writer[data-memo-summary], .ub-writer[data-memo-summary]');
+                if (writer) { const summary = writer.getAttribute('data-memo-summary'); if (summary) { tooltip.textContent = summary; tooltip.classList.add('show'); } }
+            });
+            document.addEventListener('mouseout', (e) => { const writer = e.target.closest('.gall_writer, .ub-writer'); if (writer) tooltip.classList.remove('show'); });
+
+            updateMarkers(true);
+            scheduleKeywordCheck();
+            const observer = new MutationObserver(() => scheduleMarkerUpdate());
+            observer.observe(document.body, { childList: true, subtree: true });
+        });
+    }
+
+    if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', main); } else { main(); }
+})();
