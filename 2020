@@ -243,6 +243,7 @@
                 suffixSpan.className = 'dc-lowact-suffix';
                 suffixSpan.textContent = `(${displayText || '깡계'})`;
                 suffixSpan.style.fontSize = `${suffixScale}em`;
+                suffixSpan.style.fontWeight = 'inherit';
                 if (textSpan.parentNode) textSpan.parentNode.insertBefore(suffixSpan, textSpan.nextSibling);
                 else nickEl.appendChild(suffixSpan);
             }
