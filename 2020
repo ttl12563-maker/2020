@@ -174,35 +174,23 @@
         let textSpan = nickEl.querySelector(':scope > .dc-nick-text');
         if (textSpan) return textSpan;
 
-        const textNode = Array.from(nickEl.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0);
         textSpan = document.createElement('span');
         textSpan.className = 'dc-nick-text';
 
+        const textNode = Array.from(nickEl.childNodes).find(node => node.nodeType === Node.TEXT_NODE && node.nodeValue.trim().length > 0);
         if (textNode) {
-            textSpan.textContent = textNode.nodeValue;
-            nickEl.replaceChild(textSpan, textNode);
+            const visible = textNode.nodeValue;
+            const nextSibling = textNode.nextSibling;
+            nickEl.removeChild(textNode);
+            textSpan.textContent = visible.trim();
+            if (nextSibling) nickEl.insertBefore(textSpan, nextSibling);
+            else nickEl.appendChild(textSpan);
         } else {
             textSpan.textContent = '';
             nickEl.prepend(textSpan);
         }
 
         return textSpan;
-    }
-
-    function getOriginalNickText(nickEl, textSpan) {
-        if (nickEl.dataset.origNick !== undefined) return nickEl.dataset.origNick;
-        const original = (textSpan?.textContent || '').trim();
-        nickEl.dataset.origNick = original;
-        return original;
-    }
-
-    function getLowActivityDisplayText(origNick) {
-        const lowCfg = StyleSettings.styles.lowActivity || {};
-        const mode = lowCfg.nickDisplayMode || 'colorOnly';
-        const displayText = lowCfg.displayText || '깡계';
-        if (mode === 'replace') return displayText;
-        if (mode === 'paren') return `${origNick}(${displayText})`;
-        return origNick;
     }
 
     function applyNicknameStyle(writer, styleObj, totalCount, category) {
@@ -229,10 +217,24 @@
         }
 
         const textSpan = ensureNicknameTextSpan(nickEl);
-        const originalNick = getOriginalNickText(nickEl, textSpan);
-        textSpan.textContent = category === 'lowActivity'
-            ? getLowActivityDisplayText(originalNick)
-            : originalNick;
+        if (!textSpan.dataset.origNick && textSpan.textContent.trim()) {
+            textSpan.dataset.origNick = textSpan.textContent.trim();
+        }
+
+        const originalNick = textSpan.dataset.origNick || '';
+        const lowCfg = StyleSettings.styles.lowActivity || {};
+        const mode = lowCfg.nickDisplayMode || 'colorOnly';
+        const displayText = lowCfg.displayText || '깡계';
+
+        if (category !== 'lowActivity') {
+            if (originalNick) textSpan.textContent = originalNick;
+        } else if ((mode === 'replace' || mode === 'paren') && originalNick) {
+            textSpan.textContent = mode === 'replace'
+                ? displayText
+                : `${originalNick}(${displayText})`;
+        } else if (originalNick) {
+            textSpan.textContent = originalNick;
+        }
 
         if (typeof totalCount === 'number') {
             writer.title = `글+댓글: ${totalCount}개 (기준 ${StyleSettings.activityThreshold}개 이하)`;
