@@ -30,7 +30,6 @@
                 color: '#FF0000',
                 bold: true,
                 strike: false,
-                nickDisplayMode: 'colorOnly',
                 displayText: '깡계'
             },
             scope: { color: '#DC3545', bold: true, strike: false },
@@ -49,7 +48,6 @@
                     lowActivity: {
                         ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
                         ...savedLowActivity,
-                        nickDisplayMode: savedLowActivity.nickDisplayMode === 'append' ? 'paren' : (savedLowActivity.nickDisplayMode || DEFAULT_STYLE_SETTINGS.styles.lowActivity.nickDisplayMode),
                         displayText: fallbackDisplayText
                     },
                     scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(saved.styles?.scope || {}) },
@@ -73,7 +71,6 @@
                 lowActivity: {
                     ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
                     ...nextLowActivity,
-                    nickDisplayMode: nextLowActivity.nickDisplayMode || DEFAULT_STYLE_SETTINGS.styles.lowActivity.nickDisplayMode,
                     displayText: nextLowActivity.displayText ?? nextLowActivity.replaceText ?? nextLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText
                 },
                 scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(nextSettings.styles?.scope || {}) },
@@ -217,11 +214,10 @@
         }
 
         const lowCfg = StyleSettings.styles.lowActivity || {};
-        const mode = lowCfg.nickDisplayMode || 'colorOnly';
         const displayText = lowCfg.displayText || '깡계';
         const existingSpan = nickEl.querySelector(':scope > .dc-nick-text');
 
-        if (category !== 'lowActivity' || mode === 'colorOnly') {
+        if (category !== 'lowActivity') {
             if (existingSpan?.dataset.origNick) existingSpan.textContent = existingSpan.dataset.origNick;
         } else {
             const textSpan = ensureNicknameTextSpan(nickEl);
@@ -231,9 +227,7 @@
 
             const originalNick = textSpan.dataset.origNick || '';
             if (originalNick) {
-                textSpan.textContent = mode === 'replace'
-                    ? displayText
-                    : `${originalNick}(${displayText})`;
+                textSpan.textContent = `${originalNick}(${displayText})`;
             }
         }
 
@@ -581,7 +575,6 @@
                 <div class="setting-list">
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 기준</span><input id="activityThresholdInput" type="number" class="setting-input" value="${StyleSettings.activityThreshold}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 색상</span><input id="lowColor" type="color" class="setting-input" value="${sLow.color}" style="padding:2px;"><label><input id="lowBold" type="checkbox" ${sLow.bold ? 'checked' : ''}>Bold</label><label><input id="lowStrike" type="checkbox" ${sLow.strike ? 'checked' : ''}>Strike</label></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 닉표시</span><select id="lowNickDisplayMode" class="setting-input"><option value="colorOnly" ${sLow.nickDisplayMode === 'colorOnly' ? 'selected' : ''}>색상만 변경</option><option value="replace" ${sLow.nickDisplayMode === 'replace' ? 'selected' : ''}>닉네임 교체</option><option value="paren" ${sLow.nickDisplayMode === 'paren' ? 'selected' : ''}>원래닉(텍스트)</option></select></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">표시 텍스트</span><input id="lowDisplayText" type="text" class="setting-input" value="${sLow.displayText || '깡계'}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">스코프 색상</span><input id="scopeColor" type="color" class="setting-input" value="${sScope.color}" style="padding:2px;"><label><input id="scopeBold" type="checkbox" ${sScope.bold ? 'checked' : ''}>Bold</label><label><input id="scopeStrike" type="checkbox" ${sScope.strike ? 'checked' : ''}>Strike</label></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">메모유저 색상</span><input id="memoColor" type="color" class="setting-input" value="${sMemo.color}" style="padding:2px;"><label><input id="memoBold" type="checkbox" ${sMemo.bold ? 'checked' : ''}>Bold</label><label><input id="memoStrike" type="checkbox" ${sMemo.strike ? 'checked' : ''}>Strike</label></div>
@@ -601,7 +594,6 @@
                             color: doc.getElementById('lowColor').value,
                             bold: doc.getElementById('lowBold').checked,
                             strike: doc.getElementById('lowStrike').checked,
-                            nickDisplayMode: doc.getElementById('lowNickDisplayMode').value,
                             displayText: doc.getElementById('lowDisplayText').value
                         },
                         scope: { color: doc.getElementById('scopeColor').value, bold: doc.getElementById('scopeBold').checked, strike: doc.getElementById('scopeStrike').checked },
