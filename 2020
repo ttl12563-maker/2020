@@ -30,10 +30,8 @@
                 color: '#FF0000',
                 bold: true,
                 strike: false,
-                nickDisplayMode: 'colorOnly',
-                replaceText: '깡계',
-                appendTagText: '깡계',
-                appendFormat: '{orig}({tag})'
+                displayText: '깡계',
+                suffixFontScale: 0.85
             },
             scope: { color: '#DC3545', bold: true, strike: false },
             memo: { color: '#2E86FF', bold: false, strike: false }
@@ -43,10 +41,17 @@
     function loadStyleSettings() {
         try {
             const saved = JSON.parse(localStorage.getItem(STYLE_SETTINGS_KEY) || '{}');
+            const savedLowActivity = saved.styles?.lowActivity || {};
+            const fallbackDisplayText = savedLowActivity.displayText ?? savedLowActivity.replaceText ?? savedLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText;
             return {
                 activityThreshold: Number.isFinite(parseInt(saved.activityThreshold, 10)) ? parseInt(saved.activityThreshold, 10) : DEFAULT_STYLE_SETTINGS.activityThreshold,
                 styles: {
-                    lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(saved.styles?.lowActivity || {}) },
+                    lowActivity: {
+                        ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
+                        ...savedLowActivity,
+                        displayText: fallbackDisplayText,
+                        suffixFontScale: Math.min(1, Math.max(0.5, Number(savedLowActivity.suffixFontScale ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale) || DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale))
+                    },
                     scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(saved.styles?.scope || {}) },
                     memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(saved.styles?.memo || {}) }
                 }
@@ -61,10 +66,16 @@
     const userActivityPending = {};
 
     function saveStyleSettings(nextSettings) {
+        const nextLowActivity = nextSettings.styles?.lowActivity || {};
         StyleSettings = {
             activityThreshold: Math.max(0, parseInt(nextSettings.activityThreshold, 10) || DEFAULT_STYLE_SETTINGS.activityThreshold),
             styles: {
-                lowActivity: { ...DEFAULT_STYLE_SETTINGS.styles.lowActivity, ...(nextSettings.styles?.lowActivity || {}) },
+                lowActivity: {
+                    ...DEFAULT_STYLE_SETTINGS.styles.lowActivity,
+                    ...nextLowActivity,
+                    displayText: nextLowActivity.displayText ?? nextLowActivity.replaceText ?? nextLowActivity.appendTagText ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.displayText,
+                    suffixFontScale: Math.min(1, Math.max(0.5, Number(nextLowActivity.suffixFontScale ?? DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale) || DEFAULT_STYLE_SETTINGS.styles.lowActivity.suffixFontScale))
+                },
                 scope: { ...DEFAULT_STYLE_SETTINGS.styles.scope, ...(nextSettings.styles?.scope || {}) },
                 memo: { ...DEFAULT_STYLE_SETTINGS.styles.memo, ...(nextSettings.styles?.memo || {}) }
             }
@@ -159,54 +170,83 @@
         return { color: cfg.color || '', bold: !!cfg.bold, strike: !!cfg.strike };
     }
 
-    function getOriginalNickText(writer, nickEl) {
-        if (nickEl.dataset.origNick) return nickEl.dataset.origNick;
-        const source = writer.dataset.nick || nickEl.dataset.nick || nickEl.textContent || '';
-        const original = String(source).trim() || String(source || '');
-        nickEl.dataset.origNick = original;
-        return original;
-    }
+    function ensureNicknameTextSpan(nickEl) {
+        let textSpan = nickEl.querySelector(':scope > .dc-nick-text') || nickEl.querySelector('.dc-nick-text');
+        if (textSpan) return textSpan;
 
-    function getLowActivityDisplayText(origNick) {
-        const lowCfg = StyleSettings.styles.lowActivity || {};
-        const mode = lowCfg.nickDisplayMode || 'colorOnly';
-        if (mode === 'replace') return lowCfg.replaceText || '';
-        if (mode === 'append') {
-            const tag = lowCfg.appendTagText || '';
-            const format = lowCfg.appendFormat || '{orig}({tag})';
-            return format.replaceAll('{orig}', origNick || '').replaceAll('{tag}', tag);
+        textSpan = document.createElement('span');
+        textSpan.className = 'dc-nick-text';
+
+        const walker = document.createTreeWalker(nickEl, NodeFilter.SHOW_TEXT, {
+            acceptNode(node) {
+                const text = (node.nodeValue || '').trim();
+                return text ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+            }
+        });
+        const textNode = walker.nextNode();
+
+        if (textNode && textNode.parentNode) {
+            textSpan.textContent = (textNode.nodeValue || '').trim();
+            textNode.parentNode.replaceChild(textSpan, textNode);
+        } else {
+            textSpan.textContent = '';
+            nickEl.prepend(textSpan);
         }
-        return origNick;
+
+        return textSpan;
     }
 
     function applyNicknameStyle(writer, styleObj, totalCount, category) {
         const nickEl = writer.querySelector('.nickname') || writer.querySelector('a') || writer.querySelector('em') || writer;
         if (!nickEl) return;
 
-        if (!nickEl.dataset.originalColor) {
-            nickEl.dataset.originalColor = nickEl.style.color || '';
-            nickEl.dataset.originalWeight = nickEl.style.fontWeight || '';
-            nickEl.dataset.originalStyle = nickEl.style.fontStyle || '';
-            nickEl.dataset.originalTextDecoration = nickEl.style.textDecoration || '';
+        const styleTarget = nickEl.querySelector('.dc-nick-text') || nickEl;
+
+        if (!styleTarget.dataset.originalColor) {
+            styleTarget.dataset.originalColor = styleTarget.style.color || '';
+            styleTarget.dataset.originalWeight = styleTarget.style.fontWeight || '';
+            styleTarget.dataset.originalStyle = styleTarget.style.fontStyle || '';
+            styleTarget.dataset.originalTextDecoration = styleTarget.style.textDecoration || '';
         }
 
         if (styleObj) {
-            nickEl.style.color = styleObj.color || '';
-            nickEl.style.fontWeight = styleObj.bold ? 'bold' : '';
-            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
-            nickEl.style.textDecoration = styleObj.strike ? 'line-through' : '';
+            styleTarget.style.color = styleObj.color || '';
+            styleTarget.style.fontWeight = styleObj.bold ? 'bold' : '';
+            styleTarget.style.fontStyle = styleTarget.dataset.originalStyle || '';
+            styleTarget.style.textDecoration = styleObj.strike ? 'line-through' : '';
         } else {
-            nickEl.style.color = nickEl.dataset.originalColor || '';
-            nickEl.style.fontWeight = nickEl.dataset.originalWeight || '';
-            nickEl.style.fontStyle = nickEl.dataset.originalStyle || '';
-            nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
+            styleTarget.style.color = styleTarget.dataset.originalColor || '';
+            styleTarget.style.fontWeight = styleTarget.dataset.originalWeight || '';
+            styleTarget.style.fontStyle = styleTarget.dataset.originalStyle || '';
+            styleTarget.style.textDecoration = styleTarget.dataset.originalTextDecoration || '';
         }
 
-        const originalNick = getOriginalNickText(writer, nickEl);
-        if (category === 'lowActivity') {
-            nickEl.textContent = getLowActivityDisplayText(originalNick);
+        const lowCfg = StyleSettings.styles.lowActivity || {};
+        const displayText = lowCfg.displayText || '깡계';
+        const suffixScale = Math.min(1, Math.max(0.5, Number(lowCfg.suffixFontScale ?? 0.85) || 0.85));
+        const existingSpan = nickEl.querySelector(':scope > .dc-nick-text');
+        nickEl.querySelectorAll('.dc-lowact-suffix').forEach(el => el.remove());
+
+        if (category !== 'lowActivity') {
+            if (existingSpan?.dataset.origNick) existingSpan.textContent = existingSpan.dataset.origNick;
         } else {
-            nickEl.textContent = originalNick;
+            const textSpan = ensureNicknameTextSpan(nickEl);
+            if (!textSpan.dataset.origNick) {
+                const base = (textSpan.textContent || '').trim();
+                if (base) textSpan.dataset.origNick = base;
+            }
+
+            const originalNick = (textSpan.dataset.origNick || '').trim();
+            if (originalNick) {
+                textSpan.textContent = originalNick;
+                const suffixSpan = document.createElement('span');
+                suffixSpan.className = 'dc-lowact-suffix';
+                suffixSpan.textContent = `(${displayText || '깡계'})`;
+                suffixSpan.style.fontSize = `${suffixScale}em`;
+                suffixSpan.style.fontWeight = 'inherit';
+                if (textSpan.parentNode) textSpan.parentNode.insertBefore(suffixSpan, textSpan.nextSibling);
+                else nickEl.appendChild(suffixSpan);
+            }
         }
 
         if (typeof totalCount === 'number') {
@@ -332,13 +372,13 @@
 
         tr.dc-radar-detected { background-color: #ffebee !important; box-shadow: none !important; }
         tr.dc-radar-detected:hover { background-color: #ffcdd2 !important; }
-        tr.dc-radar-detected td.gall_tit a { color: #d32f2f !important; font-weight: bold !important; }
+        tr.dc-radar-detected td.gall_tit a { font-weight: bold !important; }
 
         /* ✨ Highlight Logic Update (Support Comments) */
         tr.dc-user-highlight, li.dc-user-highlight { background-color: #E3F2FD !important; box-shadow: none !important; }
         tr.dc-user-highlight:hover, li.dc-user-highlight:hover { background-color: #BBDEFB !important; }
-        tr.dc-user-highlight td.gall_writer, li.dc-user-highlight .gall_writer { font-weight: bold !important; color: #1565C0 !important; }
-        tr.dc-user-highlight td.gall_tit a, li.dc-user-highlight .gall_tit a { font-weight: bold !important; color: #000 !important; }
+        tr.dc-user-highlight td.gall_writer, li.dc-user-highlight .gall_writer { font-weight: bold !important; }
+        tr.dc-user-highlight td.gall_tit a, li.dc-user-highlight .gall_tit a { font-weight: bold !important; }
     `;
 
     const EDITOR_CSS = `
@@ -553,10 +593,8 @@
                 <div class="setting-list">
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 기준</span><input id="activityThresholdInput" type="number" class="setting-input" value="${StyleSettings.activityThreshold}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 색상</span><input id="lowColor" type="color" class="setting-input" value="${sLow.color}" style="padding:2px;"><label><input id="lowBold" type="checkbox" ${sLow.bold ? 'checked' : ''}>Bold</label><label><input id="lowStrike" type="checkbox" ${sLow.strike ? 'checked' : ''}>Strike</label></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">깡계 닉표시</span><select id="lowNickDisplayMode" class="setting-input"><option value="colorOnly" ${sLow.nickDisplayMode === 'colorOnly' ? 'selected' : ''}>색상만 변경</option><option value="replace" ${sLow.nickDisplayMode === 'replace' ? 'selected' : ''}>닉네임 교체</option><option value="append" ${sLow.nickDisplayMode === 'append' ? 'selected' : ''}>원래닉+태그</option></select></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">교체 텍스트</span><input id="lowReplaceText" type="text" class="setting-input" value="${sLow.replaceText || ''}"></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">추가 태그</span><input id="lowAppendTagText" type="text" class="setting-input" value="${sLow.appendTagText || ''}"></div>
-                    <div class="setting-row"><span class="setting-label" style="width:95px;">추가 포맷</span><input id="lowAppendFormat" type="text" class="setting-input" value="${sLow.appendFormat || '{orig}({tag})'}"></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">표시 텍스트</span><input id="lowDisplayText" type="text" class="setting-input" value="${sLow.displayText || '깡계'}"></div>
+                    <div class="setting-row"><span class="setting-label" style="width:95px;">괄호 크기</span><input id="lowSuffixFontScale" type="number" min="0.5" max="1" step="0.01" class="setting-input" value="${Math.min(1, Math.max(0.5, Number(sLow.suffixFontScale ?? 0.85) || 0.85))}"></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">스코프 색상</span><input id="scopeColor" type="color" class="setting-input" value="${sScope.color}" style="padding:2px;"><label><input id="scopeBold" type="checkbox" ${sScope.bold ? 'checked' : ''}>Bold</label><label><input id="scopeStrike" type="checkbox" ${sScope.strike ? 'checked' : ''}>Strike</label></div>
                     <div class="setting-row"><span class="setting-label" style="width:95px;">메모유저 색상</span><input id="memoColor" type="color" class="setting-input" value="${sMemo.color}" style="padding:2px;"><label><input id="memoBold" type="checkbox" ${sMemo.bold ? 'checked' : ''}>Bold</label><label><input id="memoStrike" type="checkbox" ${sMemo.strike ? 'checked' : ''}>Strike</label></div>
                 </div>
@@ -575,10 +613,8 @@
                             color: doc.getElementById('lowColor').value,
                             bold: doc.getElementById('lowBold').checked,
                             strike: doc.getElementById('lowStrike').checked,
-                            nickDisplayMode: doc.getElementById('lowNickDisplayMode').value,
-                            replaceText: doc.getElementById('lowReplaceText').value,
-                            appendTagText: doc.getElementById('lowAppendTagText').value,
-                            appendFormat: doc.getElementById('lowAppendFormat').value
+                            displayText: doc.getElementById('lowDisplayText').value,
+                            suffixFontScale: doc.getElementById('lowSuffixFontScale').value
                         },
                         scope: { color: doc.getElementById('scopeColor').value, bold: doc.getElementById('scopeBold').checked, strike: doc.getElementById('scopeStrike').checked },
                         memo: { color: doc.getElementById('memoColor').value, bold: doc.getElementById('memoBold').checked, strike: doc.getElementById('memoStrike').checked }
@@ -885,7 +921,7 @@
                 const tags = (data.tags || []).map(t => `<span class="tag-badge">${t}</span>`).join('');
                 const category = getFinalCategory(data, key).category;
                 const sideStyle = resolveStyleByCategory(category);
-                const titleStyle = sideStyle ? `style="color:${sideStyle.color};font-weight:${sideStyle.bold ? 'bold' : 'normal'};text-decoration:${sideStyle.strike ? 'line-through' : 'none'};"` : '';
+                const titleStyle = sideStyle ? `style="font-weight:${sideStyle.bold ? 'bold' : 'normal'};text-decoration:${sideStyle.strike ? 'line-through' : 'none'};"` : '';
 
                 const info = doc.createElement('div'); info.className = 'page-info';
                 info.innerHTML = `<div class="page-main-row"><span class="page-title" ${titleStyle}>${data.nick||key}</span><span class="page-id">(${key})</span></div>${tags ? `<div class="page-tags">${tags}</div>` : ''}`;
