@@ -216,24 +216,25 @@
             nickEl.style.textDecoration = nickEl.dataset.originalTextDecoration || '';
         }
 
-        const textSpan = ensureNicknameTextSpan(nickEl);
-        if (!textSpan.dataset.origNick && textSpan.textContent.trim()) {
-            textSpan.dataset.origNick = textSpan.textContent.trim();
-        }
-
-        const originalNick = textSpan.dataset.origNick || '';
         const lowCfg = StyleSettings.styles.lowActivity || {};
         const mode = lowCfg.nickDisplayMode || 'colorOnly';
         const displayText = lowCfg.displayText || '깡계';
+        const existingSpan = nickEl.querySelector(':scope > .dc-nick-text');
 
-        if (category !== 'lowActivity') {
-            if (originalNick) textSpan.textContent = originalNick;
-        } else if ((mode === 'replace' || mode === 'paren') && originalNick) {
-            textSpan.textContent = mode === 'replace'
-                ? displayText
-                : `${originalNick}(${displayText})`;
-        } else if (originalNick) {
-            textSpan.textContent = originalNick;
+        if (category !== 'lowActivity' || mode === 'colorOnly') {
+            if (existingSpan?.dataset.origNick) existingSpan.textContent = existingSpan.dataset.origNick;
+        } else {
+            const textSpan = ensureNicknameTextSpan(nickEl);
+            if (!textSpan.dataset.origNick && textSpan.textContent.trim()) {
+                textSpan.dataset.origNick = textSpan.textContent.trim();
+            }
+
+            const originalNick = textSpan.dataset.origNick || '';
+            if (originalNick) {
+                textSpan.textContent = mode === 'replace'
+                    ? displayText
+                    : `${originalNick}(${displayText})`;
+            }
         }
 
         if (typeof totalCount === 'number') {
